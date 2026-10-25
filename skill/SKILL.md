@@ -23,7 +23,7 @@ metadata:
 
 三引擎，`--engine auto`（默认）自动选择：
 
-- **clone（当前默认嗓音！）**：F5-TTS-MLX 零样本克隆。已注册音色 **`xishi`（王者荣耀西施台词克隆，20 秒素材）**，`set-voice xishi --engine clone` 已设为默认——**不带 `--voice` 的 speak 就是用西施的声音念**。慢（每句合成 15~50 秒）但音色是克隆的
+- **clone（当前默认嗓音！）**：F5-TTS-MLX 零样本克隆。已注册音色 **`xishi`（王者荣耀西施台词克隆，20 秒素材）**，`set-voice xishi --engine clone` 已设为默认——**不带 `--voice` 的 speak 就是用西施的声音念**。单句约 10~20 秒（v2 加速：euler 采样 + 批量单进程 + 按字数估时；更长的回复边合成边播，第一句好了就念）；音色是克隆的
 - **edge**（联网）：微软神经语音 `zh-CN-XiaoxiaoNeural`（晓晓），快而自然；克隆引擎不可用或要快速朗读时用 `--engine edge`
 - **say**（离线兜底）：macos 原生 `say`，优先 Premium（Yue）> Enhanced（田田）
 

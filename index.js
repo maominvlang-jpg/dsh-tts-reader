@@ -74,19 +74,34 @@ export function apply(ctx) {
   const bySession = new Map();
   /** newest entry across every user-facing session (fallback). */
   let latest = null;
+  /**
+   * Turn accumulator: everything the assistant said SINCE the user's last
+   * message, per session. A single reply can commit several assistant
+   * messages (text block, tool edit, closing text…); reading only the newest
+   * one would skip the rest of the answer. `user/message` starts a new turn.
+   */
+  const turnText = new Map();
 
   ctx.on('session/event', (session, event) => {
-    if (event?.type !== 'assistant/message') return;
     if (!isUserFacing(session)) return;
+    if (event?.type === 'user/message') {
+      // New turn: what was said before belongs to the previous question.
+      turnText.delete(session.id);
+      return;
+    }
+    if (event?.type !== 'assistant/message') return;
     const message = event?.data?.message;
     if (message?.role !== 'assistant') return;
     const text = textOf(message);
     if (text === '') return;
+    const prior = turnText.get(session.id);
+    const merged = (prior === undefined ? text : prior + '\n\n' + text).slice(0, MAX_TEXT);
+    turnText.set(session.id, merged);
     const entry = {
       sessionId: session.id,
       seq: event.seq,
       time: event.time,
-      text: text.slice(0, MAX_TEXT),
+      text: merged,
     };
     latest = entry;
     bySession.set(session.id, entry);
@@ -98,19 +113,36 @@ export function apply(ctx) {
     }
   });
 
-  /** Scan a session's committed events newest-first for its last reply. */
+  /**
+   * Scan a session's committed events newest-first for its last REPLY —
+   * every assistant message after the newest user message, oldest first
+   * (same turn-accumulation rule as the live feed above).
+   */
   const scanEvents = (events, form) => {
     if (!Array.isArray(events)) return null;
+    let userIndex = -1;
     for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i]?.type === 'user/message') { userIndex = i; break; }
+    }
+    const chunks = [];
+    let lastMeta = null;
+    for (let i = userIndex + 1; i < events.length; i++) {
       const event = events[i];
       if (event?.type !== 'assistant/message') continue;
       const message = event?.data?.message;
       if (message?.role !== 'assistant') continue;
       const text = textOf(message);
       if (text === '') continue;
-      return { sessionId: form, seq: event.seq, time: event.time, text: text.slice(0, MAX_TEXT) };
+      chunks.push(text);
+      lastMeta = event;
     }
-    return null;
+    if (chunks.length === 0) return null;
+    return {
+      sessionId: form,
+      seq: lastMeta.seq,
+      time: lastMeta.time,
+      text: chunks.join('\n\n').slice(0, MAX_TEXT),
+    };
   };
 
   /**
@@ -801,11 +833,22 @@ export function apply(ctx) {
       return;
     }
     let wanted = null;
+    let explicitText = null;
     try {
-      wanted = new URL(req.url ?? '/', 'http://localhost').searchParams.get('session');
+      const params = new URL(req.url ?? '/', 'http://localhost').searchParams;
+      wanted = params.get('session');
+      // The Client may name the exact chunk to render (auto-read speaks only
+      // the NEW tail of a grown turn); session lookup is the fallback.
+      const raw = params.get('text');
+      if (typeof raw === 'string' && raw.trim() !== '') explicitText = raw;
     } catch {}
-    const { entry } = wanted !== null && wanted !== '' ? await lookup(wanted) : { entry: null };
-    const answer = entry ?? latest;
+    let answer;
+    if (explicitText !== null) {
+      answer = { sessionId: wanted ?? '', seq: 0, time: Date.now(), text: explicitText.slice(0, MAX_TEXT) };
+    } else {
+      const { entry } = wanted !== null && wanted !== '' ? await lookup(wanted) : { entry: null };
+      answer = entry ?? latest;
+    }
     if (answer === null || answer.text === '') {
       sendJson(res, { ok: false, reason: 'empty' });
       return;

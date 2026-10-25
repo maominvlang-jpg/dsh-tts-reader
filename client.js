@@ -121,16 +121,6 @@ window.__ModuleLoader__.load({
       return norm(a) === norm(b);
     }
 
-    /** Tiny stable string hash — identifies one reply without keeping it. */
-    function hashText(text) {
-      let h1 = 0x811c9dc5;
-      for (let i = 0; i < text.length; i++) {
-        h1 ^= text.charCodeAt(i);
-        h1 = Math.imul(h1, 0x01000193);
-      }
-      return String(h1 >>> 0) + ':' + String(text.length);
-    }
-
     /**
      * Turn markdown-ish reply text into something speakable.
      *
@@ -393,15 +383,21 @@ window.__ModuleLoader__.load({
 
       /**
        * Clone-voice channel (西施嗓): ask the Host for a pre-rendered wav of
-       * THIS session's newest reply. The Host synthesizes on demand (slow:
-       * ~15-50s/sentence) and this side polls until it is ready, then plays
+       * THIS session's newest reply. The Host synthesizes on demand (~10-20s
+       * per sentence) and this side polls until it is ready, then plays
        * the wav. Returns true when the clone voice took over; false means the
        * caller should fall back to browser speechSynthesis.
        */
-      const speakClone = async (sid, token) => {
+      const speakClone = async (sid, token, text) => {
         try {
+          // The text to speak is passed EXPLICITLY: with turn-accumulation the
+          // Host's per-session reply may be longer than the chunk this round
+          // should read (auto-read speaks only the new tail).
           let url = '/dsh-tts/clone-audio';
-          if (typeof sid === 'string' && sid !== '') url += '?session=' + encodeURIComponent(sid);
+          const params = [];
+          if (typeof sid === 'string' && sid !== '') params.push('session=' + encodeURIComponent(sid));
+          if (typeof text === 'string' && text !== '') params.push('text=' + encodeURIComponent(text.slice(0, 1500)));
+          if (params.length > 0) url += '?' + params.join('&');
           let waited = 0;
           for (;;) {
             if (token !== cloneToken) return false; // stopped / superseded
@@ -448,7 +444,7 @@ window.__ModuleLoader__.load({
         cloneBusy = true;
         cloneSession = typeof sid === 'string' && sid !== '' ? sid : null;
         setHint(t('loading'));
-        const cloneOk = await speakClone(sid, token);
+        const cloneOk = await speakClone(sid, token, raw);
         cloneBusy = false;
         if (cloneOk) return;
         if (token !== cloneToken) return; // user stopped mid-wait
@@ -553,10 +549,11 @@ window.__ModuleLoader__.load({
       };
 
       // Auto-read: watch the displayed conversation and speak each NEW
-      // reply once. Polling (2s) — the Host route is cheap and local.
-      // `lastSeen` holds the last spoken reply's identity so an unchanged
-      // reply is never read twice; switching conversations re-anchors it.
-      const lastSeenRef = React.useRef('');
+      // chunk once. Polling (2s) — the Host route is cheap and local.
+      // `spokenRef` holds the TEXT already spoken this turn; a reply that
+      // GROWS in place (tool edits append to the same turn) speaks only the
+      // new tail, and a replaced text (new turn) speaks everything.
+      const spokenRef = React.useRef('');
       React.useEffect(() => {
         if (!autoRead) return undefined;
         if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
@@ -580,8 +577,7 @@ window.__ModuleLoader__.load({
               let url = ROUTE + '?session=' + encodeURIComponent(sid);
               const res = await fetch(url, { cache: 'no-store' });
               const data = await res.json();
-              const text = typeof data?.text === 'string' ? data.text : '';
-              lastSeenRef.current = text === '' ? '' : hashText(text);
+              spokenRef.current = typeof data?.text === 'string' ? data.text : '';
               return;
             } catch {
               return;
@@ -593,14 +589,18 @@ window.__ModuleLoader__.load({
             if (data?.session != null && !sameSession(String(data.session), sid)) return; // fallback reply: not ours
             const text = typeof data?.text === 'string' ? data.text : '';
             if (text === '') return;
-            const key = hashText(text);
-            if (key === lastSeenRef.current) return; // same reply, already read
-            lastSeenRef.current = key;
-            // The fetch above is async: the manual button (or an earlier poll)
+            const spoken = spokenRef.current;
+            if (text === spoken) return; // nothing new
+            // Same turn grew in place → read ONLY the new tail; a brand-new
+            // turn (text replaced) → read all of it.
+            const chunk = spoken !== '' && text.startsWith(spoken) ? text.slice(spoken.length) : text;
+            if (chunk.trim() === '') return;
+            // The fetch above is async: the toggle (or an earlier poll)
             // may have STARTED speaking while it was in flight. Re-check here
             // or we'd cancel+restart and Chromium could play both at once.
             if (speech.speaking || cloneBusy) return;
-            void speakBest(text, sid, String(data.session ?? ''));
+            spokenRef.current = text;
+            void speakBest(chunk, sid, String(data.session ?? ''));
           } catch {}
         };
         const timer = setInterval(() => void poll(), 2000);
