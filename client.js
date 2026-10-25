@@ -246,9 +246,12 @@ window.__ModuleLoader__.load({
     let cloneBusy = false;
     /** Bumped to cancel an in-flight clone wait (stop / supersede). */
     let cloneToken = 0;
+    /** Conversation the clone wait/playback belongs to; null = none. */
+    let cloneSession = null;
     function stopCloneAudio() {
       cloneToken++;
       cloneBusy = false;
+      cloneSession = null;
       if (cloneAudio !== null) {
         try { cloneAudio.pause(); } catch {}
         cloneAudio = null;
@@ -397,7 +400,7 @@ window.__ModuleLoader__.load({
                 cloneAudio = audio;
                 const settle = (ok) => {
                   if (cloneAudio === audio) cloneAudio = null;
-                  if (token === cloneToken) speech.clear();
+                  if (token === cloneToken) { cloneSession = null; speech.clear(); }
                   resolve(ok);
                 };
                 audio.onended = () => settle(true);
@@ -427,11 +430,13 @@ window.__ModuleLoader__.load({
         stopCloneAudio(); // one voice at a time
         const token = ++cloneToken;
         cloneBusy = true;
+        cloneSession = typeof sid === 'string' && sid !== '' ? sid : null;
         setHint(t('loading'));
         const cloneOk = await speakClone(sid, token);
         cloneBusy = false;
         if (cloneOk) return;
         if (token !== cloneToken) return; // user stopped mid-wait
+        cloneSession = null;
         speakText(raw, sid, answered); // fallback voice
       };
 
@@ -1079,9 +1084,13 @@ window.__ModuleLoader__.load({
         const active = store();
         if (active !== null) {
           releaseGuard = active.subscribe(() => {
-            if (!speech.speaking && songAudio === null && songPoll === null) return;
+            // cloneBusy counts too: a pending clone SYNTHESIS keeps no audio
+            // playing, but it would start speaking in the NEW conversation if
+            // left alone — switch must cancel the wait as well.
+            if (!speech.speaking && !cloneBusy && cloneAudio === null && songAudio === null && songPoll === null) return;
             const sid = getSessionId();
             if (speech.speaking && speech.sessionId !== null && sid !== null && !sameSession(sid, speech.sessionId)) stopEngine();
+            if ((cloneBusy || cloneAudio !== null) && cloneSession !== null && sid !== null && !sameSession(sid, cloneSession)) stopEngine();
             if ((songAudio !== null || songPoll !== null) && sid !== null && lastSongSession !== null && !sameSession(sid, lastSongSession)) stopSong();
           });
         }
