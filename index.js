@@ -12,8 +12,10 @@
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { stat, createReadStream } from 'node:fs';
+import { stat, statSync, createReadStream, existsSync, mkdirSync, renameSync, unlinkSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import http from 'node:http';
 
 export const inject = ['webServer'];
@@ -708,6 +710,164 @@ export function apply(ctx) {
     });
   };
 
+  // ── Clone voice (F5-TTS-MLX): on-demand wav renders for the read-aloud
+  // button and auto-read. The skill script (~/.dsh/skills/dsh-tts-reader)
+  // does the synthesis; this half only queues jobs and serves cache files.
+  // Renders are slow (~15-50s/sentence), so requests poll this route until
+  // the wav is ready; the Client falls back to browser speech when this
+  // half answers unavailable/too-long/failed.
+
+  const CLONE_DIR = join(CONFIG_DIR, 'clone-cache');
+  const CLONE_SCRIPT = join(homedir(), '.dsh', 'skills', 'dsh-tts-reader', 'scripts', 'tts.mjs');
+  const CLONE_MAX_CHARS = 400; // F5 句级合成太慢，超长回复回退浏览器语音
+  const CLONE_KEEP = 20;
+  /** hash -> 'pending' | 'ready' | 'failed' */
+  const cloneJobs = new Map();
+  let cloneBusy = false;
+  const cloneQueue = [];
+
+  const cloneKey = (text, voice, mood) =>
+    createHash('sha1').update(`${voice}\n${mood}\n${text}`).digest('hex').slice(0, 16);
+
+  /** Host 进程的 node 不一定在 PATH 里，按候选位置解析。 */
+  const nodeBin = () => {
+    const self = String(process.execPath ?? '');
+    if (/node$/i.test(self)) return self;
+    const candidates = [
+      '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/bin/node',
+      '/opt/homebrew/bin/node',
+      '/usr/local/bin/node',
+    ];
+    try {
+      const nvmRoot = join(homedir(), '.nvm', 'versions', 'node');
+      for (const v of readdirSync(nvmRoot).sort().reverse()) candidates.push(join(nvmRoot, v, 'bin', 'node'));
+    } catch {}
+    return candidates.find((p) => existsSync(p)) ?? 'node';
+  };
+
+  const pruneCloneCache = () => {
+    try {
+      const files = readdirSync(CLONE_DIR)
+        .filter((f) => f.endsWith('.wav'))
+        .map((f) => ({ f, m: statSync(join(CLONE_DIR, f)).mtimeMs }))
+        .sort((a, b) => b.m - a.m);
+      for (const extra of files.slice(CLONE_KEEP)) {
+        try { unlinkSync(join(CLONE_DIR, extra.f)); } catch {}
+      }
+    } catch {}
+  };
+
+  const pumpCloneQueue = () => {
+    if (cloneBusy) return;
+    const job = cloneQueue.shift();
+    if (job === undefined) return;
+    cloneBusy = true;
+    const { key, file, text, voice, mood } = job;
+    mkdirSync(CLONE_DIR, { recursive: true, mode: 0o700 });
+    const tmp = file + '.tmp';
+    // 正文走 stdin，不走 argv —— 回复里若含 "--file" 之类的词元不会被误认成参数
+    const child = spawn(nodeBin(), [CLONE_SCRIPT, 'render', '--out', tmp, '--voice', voice, '--mood', mood], { stdio: ['pipe', 'ignore', 'ignore'] });
+    try { child.stdin.end(text); } catch {}
+    child.on('exit', (code) => {
+      try {
+        if (code === 0 && existsSync(tmp)) {
+          renameSync(tmp, file);
+          cloneJobs.set(key, 'ready');
+          pruneCloneCache();
+        } else {
+          try { if (existsSync(tmp)) unlinkSync(tmp); } catch {}
+          cloneJobs.set(key, 'failed');
+        }
+      } catch {
+        cloneJobs.set(key, 'failed');
+      }
+      cloneBusy = false;
+      pumpCloneQueue();
+    });
+    child.on('error', () => {
+      cloneJobs.set(key, 'failed');
+      cloneBusy = false;
+      pumpCloneQueue();
+    });
+  };
+
+  const cloneAudioHandler = async (req, res) => {
+    if (req.method !== 'GET') {
+      sendJson(res, { ok: false, error: 'GET required' }, 405);
+      return;
+    }
+    if (!existsSync(CLONE_SCRIPT)) {
+      sendJson(res, { ok: false, reason: 'unavailable' }); // skill 未安装 → 浏览器语音兜底
+      return;
+    }
+    let wanted = null;
+    try {
+      wanted = new URL(req.url ?? '/', 'http://localhost').searchParams.get('session');
+    } catch {}
+    const { entry } = wanted !== null && wanted !== '' ? await lookup(wanted) : { entry: null };
+    const answer = entry ?? latest;
+    if (answer === null || answer.text === '') {
+      sendJson(res, { ok: false, reason: 'empty' });
+      return;
+    }
+    if (answer.text.length > CLONE_MAX_CHARS) {
+      sendJson(res, { ok: false, reason: 'too-long' });
+      return;
+    }
+    const config = await loadConfig();
+    const voice = typeof config.voiceClone === 'string' && config.voiceClone !== '' ? config.voiceClone : null;
+    if (voice === null) {
+      sendJson(res, { ok: false, reason: 'unavailable' });
+      return;
+    }
+    const mood = typeof config.mood === 'string' && config.mood !== '' ? config.mood : 'calm';
+    const key = cloneKey(answer.text, voice, mood);
+    const file = join(CLONE_DIR, `${key}.wav`);
+    if (existsSync(file)) {
+      sendJson(res, { ok: true, ready: true, url: `/dsh-tts/clone-wav/${key}.wav` });
+      return;
+    }
+    const state = cloneJobs.get(key);
+    if (state === 'failed') {
+      sendJson(res, { ok: false, reason: 'failed' });
+      return;
+    }
+    if (state !== 'ready' && state !== 'pending') {
+      cloneJobs.set(key, 'pending');
+      cloneQueue.push({ key, file, text: answer.text, voice, mood });
+      pumpCloneQueue();
+    }
+    sendJson(res, { ok: true, synthesizing: true });
+  };
+
+  /** Serve one pre-rendered clone wav (name is strictly validated). */
+  const cloneWavHandler = (req, res) => {
+    if (req.method !== 'GET') {
+      sendJson(res, { ok: false, error: 'GET required' }, 405);
+      return;
+    }
+    let key = null;
+    try {
+      key = new URL(req.url ?? '/', 'http://localhost').pathname.slice('/dsh-tts/clone-wav/'.length);
+    } catch {}
+    if (typeof key !== 'string' || !/^[a-f0-9]{16}\.wav$/.test(key)) {
+      sendJson(res, { ok: false, error: 'bad key' }, 400);
+      return;
+    }
+    stat(join(CLONE_DIR, key), (error, info) => {
+      if (error !== null || !info.isFile()) {
+        sendJson(res, { ok: false, error: 'not found' }, 404);
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': 'audio/wav',
+        'content-length': String(info.size),
+        'cache-control': 'no-store',
+      });
+      createReadStream(join(CLONE_DIR, key)).pipe(res);
+    });
+  };
+
   ctx.effect(() => {
     const offs = [
       ctx.webServer.register({ kind: 'prefix', path: ROUTE, handler }),
@@ -716,6 +876,8 @@ export function apply(ctx) {
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-status', handler: singStatusHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-history', handler: historyHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/local-song', handler: localSongHandler }),
+      ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/clone-audio', handler: cloneAudioHandler }),
+      ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/clone-wav', handler: cloneWavHandler }),
     ];
     return () => {
       for (const off of offs) {

@@ -17,6 +17,7 @@ window.__ModuleLoader__.load({
         failed: '朗读失败，请重试',
         unsupported: '当前浏览器不支持语音合成',
         mismatch: '未找到当前会话的回复，改读最新一条',
+        cloning: '西施嗓合成中',
         voice: '音色',
         sing: '唱歌',
         singLyrics: '歌词（留空则 AI 自动写词）',
@@ -54,6 +55,7 @@ window.__ModuleLoader__.load({
         failed: 'Reading failed, try again',
         unsupported: 'Speech synthesis is not supported in this browser',
         mismatch: 'No reply for this session yet, reading the newest one',
+        cloning: 'Cloning voice',
         voice: 'Voice',
         sing: 'Sing',
         singLyrics: 'Lyrics (empty = AI writes them)',
@@ -230,6 +232,20 @@ window.__ModuleLoader__.load({
     /** One song at a time, module-wide (shared with the session guard). */
     let songAudio = null;
     let songPoll = null;
+    /** Clone-voice playback: wav pre-rendered by the Host via the F5 skill. */
+    let cloneAudio = null;
+    /** True while waiting for the Host to finish synthesizing a clone wav. */
+    let cloneBusy = false;
+    /** Bumped to cancel an in-flight clone wait (stop / supersede). */
+    let cloneToken = 0;
+    function stopCloneAudio() {
+      cloneToken++;
+      cloneBusy = false;
+      if (cloneAudio !== null) {
+        try { cloneAudio.pause(); } catch {}
+        cloneAudio = null;
+      }
+    }
     /** Conversation that started the current song/poll; null = none. */
     let lastSongSession = null;
     function stopSong() {
@@ -256,6 +272,7 @@ window.__ModuleLoader__.load({
      */
     function stopEngine() {
       clearKeepAlive();
+      stopCloneAudio(); // clone-voice playback rides the same stop button
       const synth = typeof window === 'undefined' ? undefined : window.speechSynthesis;
       speech.clear();
       if (!synth) return;
@@ -347,6 +364,69 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => () => { stopEngine(); }, []);
 
+      /**
+       * Clone-voice channel (西施嗓): ask the Host for a pre-rendered wav of
+       * THIS session's newest reply. The Host synthesizes on demand (slow:
+       * ~15-50s/sentence) and this side polls until it is ready, then plays
+       * the wav. Returns true when the clone voice took over; false means the
+       * caller should fall back to browser speechSynthesis.
+       */
+      const speakClone = async (sid, token) => {
+        try {
+          let url = '/dsh-tts/clone-audio';
+          if (typeof sid === 'string' && sid !== '') url += '?session=' + encodeURIComponent(sid);
+          let waited = 0;
+          for (;;) {
+            if (token !== cloneToken) return false; // stopped / superseded
+            const res = await fetch(url, { cache: 'no-store' });
+            const data = await res.json();
+            if (data?.ok === true && data.ready === true && typeof data.url === 'string') {
+              return await new Promise((resolve) => {
+                if (token !== cloneToken) { resolve(false); return; }
+                stopSong();
+                try { window.speechSynthesis.cancel(); } catch {}
+                const audio = new Audio(data.url);
+                cloneAudio = audio;
+                const settle = (ok) => {
+                  if (cloneAudio === audio) cloneAudio = null;
+                  if (token === cloneToken) speech.clear();
+                  resolve(ok);
+                };
+                audio.onended = () => settle(true);
+                audio.onerror = () => settle(false);
+                speech.start(typeof sid === 'string' && sid !== '' ? sid : null);
+                setHint('');
+                audio.play().catch(() => settle(false));
+              });
+            }
+            if (data?.ok !== true) return false; // unavailable / too-long / failed
+            // Still synthesizing: show progress, then re-poll (cap ~4 min).
+            waited += 2;
+            if (waited > 240) return false;
+            setHint(`${t('cloning')}${waited}s`);
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+        } catch {
+          return false;
+        }
+      };
+
+      /**
+       * Best voice first: the Host-rendered clone wav (西施嗓), browser
+       * speechSynthesis as the universal fallback.
+       */
+      const speakBest = async (raw, sid, answered) => {
+        stopCloneAudio(); // one voice at a time
+        const token = ++cloneToken;
+        cloneBusy = true;
+        setHint(t('loading'));
+        const cloneOk = await speakClone(sid, token);
+        cloneBusy = false;
+        if (cloneOk) return;
+        if (token !== cloneToken) return; // user stopped mid-wait
+        speakText(raw, sid, answered); // fallback voice
+      };
+
       /** Speak one reply fetched from the Host; shared by click and auto-read. */
       const speakText = (raw, sid, answered) => {
         // When the Host had to fall back to another session's reply, say so
@@ -413,7 +493,7 @@ window.__ModuleLoader__.load({
           setHint(t('failed'));
           return;
         }
-        speakText(raw, sid, answered);
+        void speakBest(raw, sid, answered);
       };
 
       // Auto-read: watch the displayed conversation and speak each NEW
@@ -431,7 +511,7 @@ window.__ModuleLoader__.load({
         let stopped = false;
         let currentSid = null;
         const poll = async () => {
-          if (stopped || speech.speaking) return; // don't fetch mid-speech
+          if (stopped || speech.speaking || cloneBusy) return; // don't fetch mid-speech
           let sid = null;
           try {
             sid = getSessionId();
@@ -463,8 +543,8 @@ window.__ModuleLoader__.load({
             // The fetch above is async: the manual button (or an earlier poll)
             // may have STARTED speaking while it was in flight. Re-check here
             // or we'd cancel+restart and Chromium could play both at once.
-            if (speech.speaking) return;
-            speakText(text, sid, String(data.session ?? ''));
+            if (speech.speaking || cloneBusy) return;
+            void speakBest(text, sid, String(data.session ?? ''));
           } catch {}
         };
         const timer = setInterval(() => void poll(), 2000);
@@ -488,7 +568,7 @@ window.__ModuleLoader__.load({
       };
 
       const onClick = () => {
-        if (speech.speaking) stopEngine();
+        if (speech.speaking || cloneBusy) stopEngine(); // cloneBusy: cancel a pending synthesis wait
         else void start();
       };
 
@@ -515,10 +595,10 @@ window.__ModuleLoader__.load({
         h('button', {
           type: 'button',
           class: STYLE_CLASS,
-          'data-speaking': speaking ? 'true' : 'false',
+          'data-speaking': speaking || cloneBusy ? 'true' : 'false',
           onClick,
-          title: speaking ? t('stop') : t('speak'),
-        }, speaking ? h(IconStop) : h(IconSpeaker), h('span', {}, speaking ? t('stop') : t('speak'))),
+          title: speaking || cloneBusy ? t('stop') : t('speak'),
+        }, speaking || cloneBusy ? h(IconStop) : h(IconSpeaker), h('span', {}, speaking || cloneBusy ? t('stop') : t('speak'))),
         h('button', {
           type: 'button',
           class: STYLE_CLASS,

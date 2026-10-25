@@ -105,6 +105,58 @@ const registerCloneVoice = (name, audioPath, refText) => {
   console.log(`   使用：node tts.mjs speak --engine clone --voice ${name} "要念的话"`);
 };
 
+/** clone 引擎：把韵律计划合成为一个 wav 文件（不播放），返回文件路径。
+ *  插件 Host 端预合成、「朗读最新回复」按钮播它，都走这条路。 */
+const renderClone = (plan, voiceName, outFile) => {
+  const dir = cloneVoiceDir(voiceName);
+  const ref = join(dir, 'ref_24k.wav');
+  if (!existsSync(ref)) throw new Error(`克隆音色不存在：${voiceName}`);
+  const { refText } = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8'));
+  const bridge = join(dirname(fileURLToPath(import.meta.url)), 'clone_speak.py');
+  // ffmpeg 可能不在 GUI 应用继承的精简 PATH 里，按常见安装位置兜底
+  const FFMPEG = ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg'].find((p) => existsSync(p)) ?? 'ffmpeg';
+  const work = join(TMP_DIR, `render-${process.pid}`);
+  rmSync(work, { recursive: true, force: true });
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  try {
+    const items = [];
+    for (const [i, seg] of plan.entries()) {
+      const raw = join(work, `s${i}.wav`);
+      execFileSync(F5_PY, [
+        bridge, '--ref', ref, '--ref-text', refText,
+        '--text', seg.sentence, '--out', raw, '--estimate-duration',
+        ...(seg.rate !== 1 ? ['--speed', seg.rate.toFixed(2)] : []),
+      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      const norm = join(work, `n${i}.wav`);
+      execFileSync(FFMPEG, ['-y', '-i', raw, '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', norm], { stdio: ['ignore', 'ignore', 'pipe'] });
+      items.push({ file: norm, pause: i < plan.length - 1 ? Math.round(seg.pause * 20) / 20 : 0 });
+    }
+    // 句间停顿用静音片段实现，concat 一次性拼接
+    const silCache = new Map();
+    const silence = (sec) => {
+      const key = sec.toFixed(2);
+      if (!silCache.has(key)) {
+        const f = join(work, `sil_${key.replace('.', '')}.wav`);
+        execFileSync(FFMPEG, ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', key, '-c:a', 'pcm_s16le', f], { stdio: ['ignore', 'ignore', 'pipe'] });
+        silCache.set(key, f);
+      }
+      return silCache.get(key);
+    };
+    const lines = [];
+    for (const item of items) {
+      lines.push(`file '${item.file}'`);
+      if (item.pause > 0) lines.push(`file '${silence(item.pause)}'`);
+    }
+    const listFile = join(work, 'list.txt');
+    writeFileSync(listFile, lines.join('\n') + '\n');
+    mkdirSync(dirname(outFile), { recursive: true, mode: 0o700 });
+    execFileSync(FFMPEG, ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', outFile], { stdio: ['ignore', 'ignore', 'pipe'] });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+  return outFile;
+};
+
 /** clone 引擎：逐句调 F5 合成（每句都带音色参考），句间按计划停顿。 */
 const speakClone = async (plan, voiceName, dryRun) => {
   const dir = cloneVoiceDir(voiceName);
@@ -204,7 +256,7 @@ const usage = () => {
 };
 
 const parseArgs = (argv) => {
-  const opts = { text: [], voice: undefined, rate: undefined, file: undefined, lang: 'zh', dryRun: false, engine: undefined, mood: undefined };
+  const opts = { text: [], voice: undefined, rate: undefined, file: undefined, lang: 'zh', dryRun: false, engine: undefined, mood: undefined, out: undefined };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--voice') opts.voice = argv[++i];
@@ -213,6 +265,7 @@ const parseArgs = (argv) => {
     else if (a === '--lang') opts.lang = argv[++i];
     else if (a === '--engine') opts.engine = argv[++i];
     else if (a === '--mood') opts.mood = argv[++i];
+    else if (a === '--out') opts.out = argv[++i];
     else if (a === '--dry-run') opts.dryRun = true;
     else if (a === '-h' || a === '--help') { usage(); process.exit(0); }
     else opts.text.push(a);
@@ -485,6 +538,25 @@ const main = async () => {
     const voice = opts.voice ?? pickDefaultSayVoice(voices);
     const plan = planProsody(cleaned, mood);
     await speakSay(plan, voice, opts.dryRun);
+    return;
+  }
+
+  if (cmd === 'render') {
+    // render：合成到 wav 文件而不播放（插件 Host 预合成用；--out 必填）
+    let text = opts.text.join(' ').trim();
+    if (opts.file) text = readFileSync(opts.file, 'utf8').trim();
+    if (text === '') text = (await readStdin()).trim();
+    if (text === '') { console.error('render 需要文本'); process.exit(1); }
+    if (!opts.out) { console.error('render 需要 --out <文件.wav>'); process.exit(1); }
+    const config = loadConfig();
+    const mood = opts.mood && opts.mood in MOODS ? opts.mood : (config.mood in MOODS ? config.mood : 'calm');
+    const voice = opts.voice ?? config.voiceClone ?? cloneVoices()[0];
+    if (!voice || !cloneVoices().includes(voice)) { console.error('render 只支持克隆音色（--voice <已注册音色>）'); process.exit(1); }
+    const cleaned = cleanText(text).slice(0, 1500); // 预合成限长，超长截断防 CPU 长跑
+    if (cleaned === '') { console.error('净化后没有可念的内容'); process.exit(1); }
+    const plan = planProsody(cleaned, mood);
+    const out = renderClone(plan, voice, opts.out);
+    console.log(out); // stdout 只打路径，调用方好取
     return;
   }
 
