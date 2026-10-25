@@ -38,6 +38,7 @@ window.__ModuleLoader__.load({
         duration: '时长(秒)',
         localNote: '本机模式：歌词留空 = 纯音乐；生成比云端快',
         history: '🎞 历史歌曲（点按重听）',
+        durationHint: '歌词约 {n} 字，30 秒可能唱不完、会漏字；将自动延长到约 {m} 秒',
       },
       en: {
         speak: 'Read latest reply',
@@ -69,6 +70,7 @@ window.__ModuleLoader__.load({
         duration: 'Length (s)',
         localNote: 'Local mode: empty lyrics = instrumental; usually faster than cloud',
         history: '🎞 History (tap to replay)',
+        durationHint: 'About {n} lyric characters: a {m}s song is safer, otherwise words get dropped; duration auto-extends',
       },
     };
 
@@ -587,6 +589,11 @@ window.__ModuleLoader__.load({
         startSong(song.url, () => setPlaying(false));
       };
 
+      // Mirror of the Host's duration estimate: warn before wasting a run.
+      const lyricChars = lyrics.replace(/\[[^\]]*\]/g, '').replace(/\s+/g, '').length;
+      const estimatedSeconds = lyricChars === 0 ? 0 : Math.min(300, Math.ceil(lyricChars * 2.4) + 10);
+      const durationTooShort = provider === 'local' && estimatedSeconds > duration;
+
       const onClickSong = () => {
         if (playing || busy) {
           finish('');
@@ -692,6 +699,10 @@ window.__ModuleLoader__.load({
           configured === true && apiKey.trim() !== '' ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('keySaved')) : null,
         ),
         status !== '' ? h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, status) : null,
+        durationTooShort
+          ? h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-state-warn-primary)' } },
+            t('durationHint').replace('{n}', String(lyricChars)).replace('{m}', String(estimatedSeconds)))
+          : null,
         history.length > 0
           ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
             h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('history')),

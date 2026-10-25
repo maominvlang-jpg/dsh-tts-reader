@@ -340,6 +340,50 @@ export function apply(ctx) {
   const localJobs = new Map();
   let localSeq = 0;
 
+  /** Structural lyric tags ACE-Step understands natively. */
+  const LYRIC_STRUCTURE = /\[(verse|chorus|intro|outro|bridge|pre_chorus|hook)\]/i;
+
+  /**
+   * Turn pasted prose-style lyrics (sentences joined by punctuation) into
+   * line-per-phrase lyrics the model can align syllables to. Text that
+   * already carries [verse]/[chorus] tags passes through untouched.
+   * Dropping punctuation and breaking lines is what stops the model from
+   * skipping characters when it races to fit a phrase.
+   */
+  const preprocessLyrics = (text) => {
+    if (text === '') return '';
+    if (LYRIC_STRUCTURE.test(text)) return text;
+    const segments = String(text)
+      .split(/[\n。！？!?；;，,、]+/u)
+      .map((s) => s.trim())
+      .filter((s) => s !== '');
+    const lines = [];
+    for (const segment of segments) {
+      // Only one-or-two character fragments (e.g. an exclamation) join the
+      // previous phrase; a 3+ character segment is a real phrase of its own.
+      if (segment.length <= 2 && lines.length > 0) lines[lines.length - 1] += segment;
+      else lines.push(segment);
+    }
+    return lines.join('\n');
+  };
+
+  /** Rough seconds a Chinese lyric needs: ~2.4s per character plus intro. */
+  const estimateLyricSeconds = (text) => {
+    const chars = String(text).replace(/\[[^\]]*\]/g, '').replace(/\s+/g, '').length;
+    if (chars === 0) return 0;
+    return Math.min(300, Math.ceil(chars * 2.4) + 10);
+  };
+
+  /**
+   * Only ever EXTEND the requested duration so every lyric character has
+   * room to be sung; instrumental (empty lyrics) keeps the request as-is.
+   */
+  const fitDuration = (lyrics, requested) => {
+    const estimate = estimateLyricSeconds(lyrics);
+    if (estimate === 0) return requested;
+    return Math.min(600, Math.max(requested, estimate));
+  };
+
   /** Generated-song history (newest first), persisted as JSON, capped. */
   let historyCache = null;
   const loadHistory = async () => {
@@ -369,6 +413,11 @@ export function apply(ctx) {
   /** Run one ACE-Step generation through mlx-serve; stores the wav on disk. */
   const runLocalJob = async (taskId, config, options) => {
     const job = localJobs.get(taskId);
+    // Fit the song to its lyrics: prose lyrics become one line per phrase,
+    // and a too-short duration is extended so no character gets dropped.
+    const lyrics = preprocessLyrics(options.lyrics);
+    const duration = fitDuration(lyrics, options.duration);
+    job.duration = duration;
     try {
       const base = String(config.localBase || DEFAULT_LOCAL_BASE).replace(/\/+$/, '');
       const res = await fetch(`${base}/v1/audio/music-generations`, {
@@ -377,9 +426,9 @@ export function apply(ctx) {
         body: JSON.stringify({
           model: typeof config.localModel === 'string' && config.localModel !== '' ? config.localModel : DEFAULT_LOCAL_MODEL,
           prompt: options.style,
-          lyrics: options.lyrics,
+          lyrics,
           vocal_language: 'zh',
-          duration_seconds: options.duration,
+          duration_seconds: duration,
         }),
       });
       if (!res.ok) {
@@ -400,13 +449,13 @@ export function apply(ctx) {
       const fileName = `local-${taskId}.wav`;
       await writeFile(join(SONGS_DIR, fileName), bytes, { mode: 0o600 });
       job.status = 'SUCCESS';
-      job.tracks = [{ id: taskId, title: options.title, duration: options.duration, url: `/dsh-tts/local-song/${fileName}` }];
+      job.tracks = [{ id: taskId, title: options.title, duration, url: `/dsh-tts/local-song/${fileName}` }];
       await appendHistory({
         id: taskId,
         source: 'local',
         url: `/dsh-tts/local-song/${fileName}`,
         style: options.style,
-        duration: options.duration,
+        duration,
         createdAt: Date.now(),
       });
     } catch (error) {
