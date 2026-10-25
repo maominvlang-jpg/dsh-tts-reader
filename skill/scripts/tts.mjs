@@ -89,11 +89,15 @@ const pickDefaultEdgeVoice = () => {
 
 // ── 情绪基调：rate/pitch/volume 的整体偏移 ─────────────────────────────
 const MOODS = {
-  calm:   { rate: 0.00, pitch: 0,  volume: 0 },
-  happy:  { rate: 0.08, pitch: 12, volume: 3 },
-  excited:{ rate: 0.18, pitch: 22, volume: 6 },
-  sad:    { rate: -0.12, pitch: -10, volume: -5 },
-  angry:  { rate: 0.10, pitch: -4, volume: 8 },
+  calm:     { rate: 0.00, pitch: 0,  volume: 0 },
+  happy:    { rate: 0.08, pitch: 12, volume: 3 },
+  excited:  { rate: 0.18, pitch: 22, volume: 6 },
+  sad:      { rate: -0.12, pitch: -10, volume: -5 },
+  angry:    { rate: 0.10, pitch: -4, volume: 8 },
+  // 傲娇：一句凶一句软地摇摆（见 planProsody 装饰），整体偏快偏高
+  tsundere: { rate: 0.02, pitch: 4, volume: 3 },
+  // 撒娇：整体放慢，尾音拖长（好啦 → 好啦～～）
+  sajiao:   { rate: -0.18, pitch: 14, volume: -3 },
 };
 
 const usage = () => {
@@ -102,7 +106,7 @@ const usage = () => {
   node tts.mjs speak [options] [text]    朗读；文本缺省时读 stdin
       --engine auto|edge|say   默认 auto（edge 可用则用 edge）
       --voice <name>           音色（edge: zh-CN-XiaoxiaoNeural；say: 系统音色名）
-      --mood calm|happy|sad|excited|angry   情绪基调（默认 calm）
+      --mood calm|happy|sad|excited|angry|tsundere|sajiao   情绪基调（默认 calm）
       --rate <wpm 或 ±%>       say: wpm（默认 200）；edge: ±%
       --file <path>            从 utf-8 文件读取文本
       --dry-run                只打印韵律计划
@@ -157,10 +161,14 @@ const cleanText = (text) => text
  *   陈述句尾   —— 停 0.3 秒
  *   超过 40 字的长句 —— 轻微降速（喘口气）
  * 基调 mood 在此之上整体偏移，并微调停顿长短（sad 慢半拍、excited 紧凑）。
+ * 两种「人格化」基调在逐句结果上再做装饰：
+ *   tsundere 傲娇 —— 奇数句又凶又快（高调+提速），偶数句突然放软（降调+放慢），
+ *                    像「才、才没有特意……哼！」那种口是心非的摇摆
+ *   sajiao   撒娇 —— 句尾语气词拖长（啦→啦～～、嘛→嘛～～），整体更慢更嗲
  */
 const planProsody = (text, mood) => {
   const base = MOODS[mood] ?? MOODS.calm;
-  const pauseScale = { calm: 1.0, happy: 0.9, excited: 0.65, sad: 1.25, angry: 0.8 }[mood] ?? 1.0;
+  const pauseScale = { calm: 1.0, happy: 0.9, excited: 0.65, sad: 1.25, angry: 0.8, tsundere: 0.85, sajiao: 1.15 }[mood] ?? 1.0;
   const paragraphs = String(text).split(/\n+/).map((p) => p.trim()).filter((p) => p !== '');
   const segs = [];
   for (const [pi, para] of paragraphs.entries()) {
@@ -181,6 +189,40 @@ const planProsody = (text, mood) => {
       segs.push({ sentence, rate, pitch, note, pause: Math.round(pause * pauseScale * 100) / 100 });
     }
   }
+
+  // ── 人格化装饰：傲娇的口是心非摇摆 ─────────────────────────────────
+  if (mood === 'tsundere') {
+    for (const [i, seg] of segs.entries()) {
+      if (i % 2 === 0) {
+        // 「凶」句：又快又冲，音调拔高，停顿收短（像赌气甩话）
+        seg.rate *= 1.12;
+        seg.pitch += 16;
+        seg.pause = Math.round(seg.pause * 0.7 * 100) / 100;
+        seg.note = '傲娇·凶｜' + seg.note;
+      } else {
+        // 「软」句：突然放慢放低，像凶完又心软（才、才没有那个意思……）
+        seg.rate *= 0.82;
+        seg.pitch -= 12;
+        seg.pause = Math.round(seg.pause * 1.3 * 100) / 100;
+        seg.note = '傲娇·软｜' + seg.note;
+      }
+    }
+  }
+
+  // ── 人格化装饰：撒娇的拖长尾音 ─────────────────────────────────────
+  if (mood === 'sajiao') {
+    for (const seg of segs) {
+      // 句尾语气词拖成波浪长音：啦→啦～～、嘛→嘛～～、呀/哦/喔/哎/嘿同理
+      seg.sentence = seg.sentence.replace(/([啦嘛呀哦喔哎嘿呦欸])([。！？!?…]*)$/u, '$1～～$2');
+      // 拖音句再放慢一点、调子抬高一点，念出来自然带嗲
+      if (seg.sentence.includes('～～')) {
+        seg.rate *= 0.88;
+        seg.pitch += 6;
+        seg.note = '撒娇拖音｜' + seg.note;
+      }
+    }
+  }
+
   return segs;
 };
 
