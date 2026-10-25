@@ -230,6 +230,19 @@ window.__ModuleLoader__.load({
      * see "idle" and start a second, overlapping voice.
      */
     let utteranceToken = 0;
+    /**
+     * Pending between-paragraph breath timer of the segmented fallback voice.
+     * It holds a queued `speakNext` that would START A NEW UTTERANCE after
+     * stop — so the engine hard-stop must clear it and bump the token, or
+     * "stop" only silenced the current paragraph and the next one resumed.
+     */
+    let paraTimer = null;
+    function clearParaTimer() {
+      if (paraTimer !== null) {
+        clearTimeout(paraTimer);
+        paraTimer = null;
+      }
+    }
     function clearKeepAlive() {
       if (keepAlive !== null) {
         clearInterval(keepAlive);
@@ -283,6 +296,11 @@ window.__ModuleLoader__.load({
      */
     function stopEngine() {
       clearKeepAlive();
+      // Invalidate the segmented chain FIRST: a queued paragraph timer would
+      // otherwise start the next utterance 800ms after "stop" (and a switched
+      // conversation would hear the remainder in the WRONG session).
+      utteranceToken++;
+      clearParaTimer();
       stopCloneAudio(); // clone-voice playback rides the same stop button
       const synth = typeof window === 'undefined' ? undefined : window.speechSynthesis;
       speech.clear();
@@ -488,7 +506,11 @@ window.__ModuleLoader__.load({
               return;
             }
             // Paragraph break = catch your breath before the next one.
-            setTimeout(speakNext, 800);
+            // Registered so stopEngine can cancel the queued continuation.
+            paraTimer = setTimeout(() => {
+              paraTimer = null;
+              speakNext();
+            }, 800);
           };
           utter.onend = settle;
           utter.onerror = settle;
