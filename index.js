@@ -14,6 +14,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { stat, createReadStream } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import http from 'node:http';
 
 export const inject = ['webServer'];
 
@@ -412,6 +413,35 @@ export function apply(ctx) {
     await persistHistory(list);
   };
 
+  /**
+   * POST JSON to the local engine with NO response timeout. `fetch` aborts
+   * after 300s of waiting for headers, which kills every long render (a
+   * 4-minute song needs 8+ minutes on an M3); node:http waits it out.
+   */
+  const engineCall = (url, payload) => new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify(payload));
+    const request = http.request(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(body.length),
+      },
+    }, (response) => {
+      const status = response.statusCode ?? 0;
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        const isAudio = String(response.headers['content-type'] ?? '').startsWith('audio');
+        resolve({ ok: status >= 200 && status < 300, status, buffer, isAudio });
+      });
+      response.on('error', reject);
+    });
+    request.on('error', reject);
+    request.setTimeout(0);
+    request.end(body);
+  });
+
   /** Run one ACE-Step generation through mlx-serve; stores the wav on disk. */
   const runLocalJob = async (taskId, config, options) => {
     const job = localJobs.get(taskId);
@@ -422,26 +452,19 @@ export function apply(ctx) {
     job.duration = duration;
     try {
       const base = String(config.localBase || DEFAULT_LOCAL_BASE).replace(/\/+$/, '');
-      const res = await fetch(`${base}/v1/audio/music-generations`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: typeof config.localModel === 'string' && config.localModel !== '' ? config.localModel : DEFAULT_LOCAL_MODEL,
-          prompt: options.style,
-          lyrics,
-          vocal_language: 'zh',
-          duration_seconds: duration,
-        }),
+      const result = await engineCall(`${base}/v1/audio/music-generations`, {
+        model: typeof config.localModel === 'string' && config.localModel !== '' ? config.localModel : DEFAULT_LOCAL_MODEL,
+        prompt: options.style,
+        lyrics,
+        vocal_language: 'zh',
+        duration_seconds: duration,
       });
-      if (!res.ok) {
-        let detail = '';
-        try {
-          detail = (await res.text()).slice(0, 300);
-        } catch {}
+      if (!result.ok) {
         job.status = 'GENERATE_AUDIO_FAILED';
-        job.error = `mlx-serve HTTP ${res.status} ${detail}`;
+        job.error = `mlx-serve HTTP ${result.status} ${result.buffer.toString('utf8').slice(0, 300)}`;
         return;
-      }      const bytes = Buffer.from(await res.arrayBuffer());
+      }
+      const bytes = result.buffer;
       if (bytes.length < 1024) {
         job.status = 'GENERATE_AUDIO_FAILED';
         job.error = 'mlx-serve returned empty audio';
