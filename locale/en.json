@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "TTS Reader",
+    "description": "Adds a Speak button below the message composer that reads the latest AI reply aloud with the browser's built-in voice."
+  }
+}

@@ -1,0 +1,4 @@
+- insert:
+    - id: tts-reader
+      name: 'dsh-tts-reader'
+      config: {}

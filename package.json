@@ -1,0 +1,29 @@
+{
+  "name": "dsh-tts-reader",
+  "version": "1.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "README.en.md", "LICENSE"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maominvlang-jpg/dsh-tts-reader.git"
+  },
+  "homepage": "https://github.com/maominvlang-jpg/dsh-tts-reader",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+    }
+  }
+}
