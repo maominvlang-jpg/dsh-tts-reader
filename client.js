@@ -11,6 +11,7 @@ window.__ModuleLoader__.load({
       zh: {
         speak: '朗读最新回复',
         stop: '停止朗读',
+        autoRead: '自动朗读',
         loading: '获取中…',
         empty: '暂无可朗读的内容',
         failed: '朗读失败，请重试',
@@ -47,6 +48,7 @@ window.__ModuleLoader__.load({
       en: {
         speak: 'Read latest reply',
         stop: 'Stop reading',
+        autoRead: 'Auto-read',
         loading: 'Loading…',
         empty: 'Nothing to read yet',
         failed: 'Reading failed, try again',
@@ -117,6 +119,16 @@ window.__ModuleLoader__.load({
       if (typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return false;
       const norm = (s) => (s.startsWith('session-') ? s.slice(8) : s).toLowerCase();
       return norm(a) === norm(b);
+    }
+
+    /** Tiny stable string hash — identifies one reply without keeping it. */
+    function hashText(text) {
+      let h1 = 0x811c9dc5;
+      for (let i = 0; i < text.length; i++) {
+        h1 ^= text.charCodeAt(i);
+        h1 = Math.imul(h1, 0x01000193);
+      }
+      return String(h1 >>> 0) + ':' + String(text.length);
     }
 
     /**
@@ -246,6 +258,8 @@ window.__ModuleLoader__.load({
     }
     /** localStorage key of the user's chosen voice (by voiceURI). */
     const VOICE_KEY = 'dsh-tts-reader.voice';
+    /** localStorage key of the auto-read toggle. */
+    const AUTO_KEY = 'dsh-tts-reader.autoRead';
 
     /** The persisted voiceURI, or '' when the user never picked one. */
     function savedVoiceUri() {
@@ -314,35 +328,19 @@ window.__ModuleLoader__.load({
       const state = React.useSyncExternalStore(speech.subscribe, speech.snapshot, speech.snapshot);
       const speaking = state.speaking;
       const [hint, setHint] = React.useState('');
+      const [autoRead, setAutoRead] = React.useState(() => {
+        try {
+          return localStorage.getItem(AUTO_KEY) === '1';
+        } catch {
+          return false;
+        }
+      });
       const t = translate;
 
       React.useEffect(() => () => { stopEngine(); }, []);
 
-      const start = async () => {
-        if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-          setHint(t('unsupported'));
-          return;
-        }
-        setHint(t('loading'));
-        let raw = '';
-        let answered = null;
-        // Read the conversation the page is showing, so the button always
-        // speaks THIS session's newest reply rather than another one.
-        let sid = null;
-        try {
-          sid = getSessionId();
-        } catch {}
-        try {
-          let url = ROUTE;
-          if (typeof sid === 'string' && sid !== '') url += '?session=' + encodeURIComponent(sid);
-          const res = await fetch(url, { cache: 'no-store' });
-          const data = await res.json();
-          raw = typeof data?.text === 'string' ? data.text : '';
-          answered = typeof data?.session === 'string' ? data.session : null;
-        } catch {
-          setHint(t('failed'));
-          return;
-        }
+      /** Speak one reply fetched from the Host; shared by click and auto-read. */
+      const speakText = (raw, sid, answered) => {
         // When the Host had to fall back to another session's reply, say so
         // instead of silently reading the wrong conversation.
         if (sid !== null && answered !== null && !sameSession(sid, answered)) setHint(t('mismatch'));
@@ -372,6 +370,101 @@ window.__ModuleLoader__.load({
             if (synth.speaking && !synth.paused) { synth.pause(); synth.resume(); }
           } catch {}
         }, 9000);
+      };
+
+      const start = async () => {
+        if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+          setHint(t('unsupported'));
+          return;
+        }
+        setHint(t('loading'));
+        let raw = '';
+        let answered = null;
+        // Read the conversation the page is showing, so the button always
+        // speaks THIS session's newest reply rather than another one.
+        let sid = null;
+        try {
+          sid = getSessionId();
+        } catch {}
+        try {
+          let url = ROUTE;
+          if (typeof sid === 'string' && sid !== '') url += '?session=' + encodeURIComponent(sid);
+          const res = await fetch(url, { cache: 'no-store' });
+          const data = await res.json();
+          raw = typeof data?.text === 'string' ? data.text : '';
+          answered = typeof data?.session === 'string' ? data.session : null;
+        } catch {
+          setHint(t('failed'));
+          return;
+        }
+        speakText(raw, sid, answered);
+      };
+
+      // Auto-read: watch the displayed conversation and speak each NEW
+      // reply once. Polling (2s) — the Host route is cheap and local.
+      // `lastSeen` holds the last spoken reply's identity so an unchanged
+      // reply is never read twice; switching conversations re-anchors it.
+      const lastSeenRef = React.useRef('');
+      React.useEffect(() => {
+        if (!autoRead) return undefined;
+        if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+          setHint(t('unsupported'));
+          setAutoRead(false);
+          return undefined;
+        }
+        let stopped = false;
+        let currentSid = null;
+        const poll = async () => {
+          if (stopped || speech.speaking) return; // don't fetch mid-speech
+          let sid = null;
+          try {
+            sid = getSessionId();
+          } catch {}
+          if (sid === null) return;
+          if (!sameSession(sid, currentSid)) {
+            // Conversation switched: re-anchor without speaking the past.
+            currentSid = sid;
+            try {
+              let url = ROUTE + '?session=' + encodeURIComponent(sid);
+              const res = await fetch(url, { cache: 'no-store' });
+              const data = await res.json();
+              const text = typeof data?.text === 'string' ? data.text : '';
+              lastSeenRef.current = text === '' ? '' : hashText(text);
+              return;
+            } catch {
+              return;
+            }
+          }
+          try {
+            const res = await fetch(ROUTE + '?session=' + encodeURIComponent(sid), { cache: 'no-store' });
+            const data = await res.json();
+            if (data?.session != null && !sameSession(String(data.session), sid)) return; // fallback reply: not ours
+            const text = typeof data?.text === 'string' ? data.text : '';
+            if (text === '') return;
+            const key = hashText(text);
+            if (key === lastSeenRef.current) return; // same reply, already read
+            lastSeenRef.current = key;
+            speakText(text, sid, String(data.session ?? ''));
+          } catch {}
+        };
+        const timer = setInterval(() => void poll(), 2000);
+        // Anchor immediately so the CURRENT reply is not replayed on enable.
+        void poll();
+        return () => {
+          stopped = true;
+          clearInterval(timer);
+        };
+      }, [autoRead]);
+
+      const toggleAutoRead = () => {
+        setAutoRead((v) => {
+          const next = !v;
+          try {
+            if (next) localStorage.setItem(AUTO_KEY, '1');
+            else localStorage.removeItem(AUTO_KEY);
+          } catch {}
+          return next;
+        });
       };
 
       const onClick = () => {
@@ -406,6 +499,13 @@ window.__ModuleLoader__.load({
           onClick,
           title: speaking ? t('stop') : t('speak'),
         }, speaking ? h(IconStop) : h(IconSpeaker), h('span', {}, speaking ? t('stop') : t('speak'))),
+        h('button', {
+          type: 'button',
+          class: STYLE_CLASS,
+          'data-speaking': autoRead ? 'true' : 'false',
+          onClick: toggleAutoRead,
+          title: t('autoRead'),
+        }, h('span', {}, autoRead ? '🔔' : '🔕'), h('span', {}, t('autoRead'))),
         h(VoiceSelect, { translate }),
         h(SingPanel, { translate, getSessionId }),
         hint !== '' ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, hint) : null);
