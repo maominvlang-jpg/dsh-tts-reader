@@ -9,9 +9,8 @@ window.__ModuleLoader__.load({
     /** UI strings for the two locales the harness ships; keyed 'zh' | 'en'. */
     const DICT = {
       zh: {
-        speak: '朗读最新回复',
-        stop: '停止朗读',
         autoRead: '自动朗读',
+        stopAuto: '自动朗读中，点击停止',
         loading: '获取中…',
         empty: '暂无可朗读的内容',
         failed: '朗读失败，请重试',
@@ -47,9 +46,8 @@ window.__ModuleLoader__.load({
         download: '下载这首',
       },
       en: {
-        speak: 'Read latest reply',
-        stop: 'Stop reading',
         autoRead: 'Auto-read',
+        stopAuto: 'Auto-reading, click to stop',
         loading: 'Loading…',
         empty: 'Nothing to read yet',
         failed: 'Reading failed, try again',
@@ -614,20 +612,24 @@ window.__ModuleLoader__.load({
         };
       }, [autoRead]);
 
+      /**
+       * The single read-aloud control (v1.6.5): ON reads the current newest
+       * reply immediately and keeps following new ones; OFF silences
+       * everything at once — no separate "read once" button anymore.
+       */
       const toggleAutoRead = () => {
-        setAutoRead((v) => {
-          const next = !v;
-          try {
-            if (next) localStorage.setItem(AUTO_KEY, '1');
-            else localStorage.removeItem(AUTO_KEY);
-          } catch {}
-          return next;
-        });
-      };
-
-      const onClick = () => {
-        if (speech.speaking || cloneBusy) stopEngine(); // cloneBusy: cancel a pending synthesis wait
-        else void start();
+        const next = !autoRead;
+        setAutoRead(next);
+        try {
+          if (next) localStorage.setItem(AUTO_KEY, '1');
+          else localStorage.removeItem(AUTO_KEY);
+        } catch {}
+        if (next) {
+          void start(); // ON = speak the newest reply right now
+        } else {
+          stopEngine(); // OFF = stop speech, clone audio and pending waits
+          setHint('');
+        }
       };
 
       return h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
@@ -653,17 +655,10 @@ window.__ModuleLoader__.load({
         h('button', {
           type: 'button',
           class: STYLE_CLASS,
-          'data-speaking': speaking || cloneBusy ? 'true' : 'false',
-          onClick,
-          title: speaking || cloneBusy ? t('stop') : t('speak'),
-        }, speaking || cloneBusy ? h(IconStop) : h(IconSpeaker), h('span', {}, speaking || cloneBusy ? t('stop') : t('speak'))),
-        h('button', {
-          type: 'button',
-          class: STYLE_CLASS,
-          'data-speaking': autoRead ? 'true' : 'false',
+          'data-speaking': autoRead || speaking || cloneBusy ? 'true' : 'false',
           onClick: toggleAutoRead,
-          title: t('autoRead'),
-        }, h('span', {}, autoRead ? '🔔' : '🔕'), h('span', {}, t('autoRead'))),
+          title: autoRead ? t('stopAuto') : t('autoRead'),
+        }, speaking || cloneBusy ? h(IconStop) : h(IconSpeaker), h('span', {}, t('autoRead'))),
         // Voice picker hidden on request: the default voice is remembered in
         // savedVoiceUri(), and switching is done by asking the agent.
         null,
