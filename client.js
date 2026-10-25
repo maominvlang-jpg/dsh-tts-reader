@@ -40,6 +40,7 @@ window.__ModuleLoader__.load({
         history: '🎞 历史歌曲（点按重听）',
         durationHint: '歌词约 {n} 字，30 秒可能唱不完、会漏字；将自动延长到约 {m} 秒',
         engineBusy: '引擎正在生成上一首歌，请等它完成再点（本机一次只能生成一首）',
+        download: '下载这首',
       },
       en: {
         speak: 'Read latest reply',
@@ -73,6 +74,7 @@ window.__ModuleLoader__.load({
         history: '🎞 History (tap to replay)',
         durationHint: 'About {n} lyric characters: a {m}s song is safer, otherwise words get dropped; duration auto-extends',
         engineBusy: 'The engine is still rendering the previous song; wait for it to finish (one song at a time)',
+        download: 'Download this song',
       },
     };
 
@@ -285,6 +287,8 @@ window.__ModuleLoader__.load({
     const STYLE_CLASS = 'dsh-tts-reader-btn';
     const SELECT_CLASS = 'dsh-tts-reader-voice';
     const HIST_CLASS = 'dsh-tts-reader-hist';
+    const ROW_CLASS = 'dsh-tts-reader-hist-row';
+    const DL_CLASS = 'dsh-tts-reader-dl';
 
     function IconSpeaker() {
       return h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, 'aria-hidden': true,
@@ -384,7 +388,13 @@ window.__ModuleLoader__.load({
           + `.${HIST_CLASS}{display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;`
           + `padding:3px 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:transparent;`
           + `color:var(--dsw-alias-label-primary);font-size:12px;line-height:16px;cursor:pointer;text-align:left;}`
-          + `.${HIST_CLASS}:hover{background:var(--dsw-alias-bg-layer-2);}`),
+          + `.${HIST_CLASS}:hover{background:var(--dsw-alias-bg-layer-2);}`
+          + `.${ROW_CLASS}{display:flex;align-items:center;gap:4px;}`
+          + `.${DL_CLASS}{display:inline-flex;align-items:center;justify-content:center;`
+          + `flex:0 0 auto;width:26px;height:22px;border:1px solid var(--dsw-alias-border-l1);`
+          + `border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);`
+          + `font-size:12px;text-decoration:none;cursor:pointer;}`
+          + `.${DL_CLASS}:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);}`),
         h('button', {
           type: 'button',
           class: STYLE_CLASS,
@@ -596,6 +606,15 @@ window.__ModuleLoader__.load({
       const estimatedSeconds = lyricChars === 0 ? 0 : Math.min(300, Math.ceil(lyricChars * 2.4) + 10);
       const durationTooShort = provider === 'local' && estimatedSeconds > duration;
 
+      /** A filesystem-friendly download name derived from the song entry. */
+      const downloadName = (song) => {
+        const raw = String(song?.style || song?.title || song?.id || 'song').slice(0, 24);
+        const safe = raw.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || 'song';
+        const ext = /\.mp3($|\?)/i.test(String(song?.url ?? '')) ? 'mp3' : 'wav';
+        const seconds = typeof song?.duration === 'number' ? Math.round(song.duration) : '';
+        return `${safe}-${seconds}s.${ext}`;
+      };
+
       const onClickSong = () => {
         if (playing || busy) {
           finish('');
@@ -709,18 +728,27 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
             h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('history')),
             h('div', { style: { maxHeight: '132px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' } },
-              history.map((song) => h('button', {
-                key: String(song?.id ?? ''),
-                type: 'button',
-                class: HIST_CLASS,
-                onClick: () => replay(song),
-                title: String(song?.style ?? ''),
-              },
-              h('span', { style: { flex: '0 0 auto' } }, '▶'),
-              h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                String(song?.style || song?.title || song?.id || '')),
-              h('span', { style: { flex: '0 0 auto', color: 'var(--dsw-alias-label-secondary)' } },
-                `${typeof song?.duration === 'number' ? Math.round(song.duration) : '?'}s ${song?.source === 'cloud' ? '☁️' : '💻'}`)))))
+              history.map((song) => h('div', { key: String(song?.id ?? ''), class: ROW_CLASS },
+                h('button', {
+                  type: 'button',
+                  class: HIST_CLASS,
+                  onClick: () => replay(song),
+                  title: String(song?.style ?? ''),
+                  style: { flex: '1 1 auto', minWidth: '0' },
+                },
+                h('span', { style: { flex: '0 0 auto' } }, '▶'),
+                h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                  String(song?.style || song?.title || song?.id || '')),
+                h('span', { style: { flex: '0 0 auto', color: 'var(--dsw-alias-label-secondary)' } },
+                  `${typeof song?.duration === 'number' ? Math.round(song.duration) : '?'}s ${song?.source === 'cloud' ? '☁️' : '💻'}`)),
+                h('a', {
+                  class: DL_CLASS,
+                  href: String(song?.url ?? ''),
+                  download: downloadName(song),
+                  target: song?.source === 'cloud' ? '_blank' : undefined,
+                  rel: 'noopener',
+                  title: t('download'),
+                }, '⬇')))))
           : null,
         ) : null);
     }
