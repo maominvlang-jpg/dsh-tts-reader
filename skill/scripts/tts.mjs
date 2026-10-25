@@ -28,14 +28,17 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const CONFIG_DIR = join(homedir(), '.dsh', 'dsh-tts-reader');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 const TMP_DIR = join(CONFIG_DIR, 'tts-tmp');
 const EDGE_BIN = join(CONFIG_DIR, 'venv', 'bin', 'edge-tts');
+const F5_PY = join(CONFIG_DIR, 'venv-f5', 'bin', 'python3');
+const CLONE_DIR = join(CONFIG_DIR, 'voice-clone');
 
 const loadConfig = () => {
   try { return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; }
@@ -61,6 +64,89 @@ const listVoices = () => {
 
 /** edge-tts 是否可用（venv 已装 + 能联网由实际调用兜底）。 */
 const edgeAvailable = () => existsSync(EDGE_BIN);
+
+// ── clone 引擎：F5-TTS-MLX 零样本音色克隆 ─────────────────────────────
+// 音色库：~/.dsh/dsh-tts-reader/voice-clone/<name>/ 下放
+//   ref_24k.wav  参考音频（afconvert 转好的 24kHz 单声道）
+//   meta.json    { refText: "参考音频的台词原文", source: "原始文件" }
+const cloneAvailable = () => existsSync(F5_PY) && existsSync(CLONE_DIR);
+
+/** 列出已注册的克隆音色名。 */
+const cloneVoices = () => {
+  try {
+    return readdirSync(CLONE_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && existsSync(join(CLONE_DIR, e.name, 'ref_24k.wav')))
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+};
+
+const cloneVoiceDir = (name) => {
+  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) {
+    console.error('音色名只能小写字母/数字/连字符，1~32 位');
+    process.exit(1);
+  }
+  return join(CLONE_DIR, name);
+};
+
+/** 注册克隆音色：任意音频 → afconvert 转 24kHz wav → 记录台词。 */
+const registerCloneVoice = (name, audioPath, refText) => {
+  const dir = cloneVoiceDir(name);
+  if (!existsSync(audioPath)) { console.error(`音频不存在：${audioPath}`); process.exit(1); }
+  if (!refText || refText.trim() === '') { console.error('必须提供参考音频的台词 --ref-text（F5 靠它对齐）'); process.exit(1); }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const wav = join(dir, 'ref_24k.wav');
+  // F5 硬性要求 24kHz；单声道更稳
+  execFileSync('afconvert', ['-f', 'WAVE', '-d', 'LEI16@24000', '-c', '1', audioPath, wav], { stdio: 'ignore' });
+  writeFileSync(join(dir, 'meta.json'), JSON.stringify({ refText: refText.trim(), source: audioPath }, null, 2));
+  console.log(`✅ 克隆音色已注册：${name}`);
+  console.log(`   参考音频：${wav}（试听：afplay "${wav}"）`);
+  console.log(`   使用：node tts.mjs speak --engine clone --voice ${name} "要念的话"`);
+};
+
+/** clone 引擎：逐句调 F5 合成（每句都带音色参考），句间按计划停顿。 */
+const speakClone = async (plan, voiceName, dryRun) => {
+  const dir = cloneVoiceDir(voiceName);
+  const ref = join(dir, 'ref_24k.wav');
+  if (!existsSync(ref)) { console.error(`克隆音色不存在：${voiceName}（已注册：${cloneVoices().join(', ') || '无'}）`); process.exit(1); }
+  const { refText } = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8'));
+  const bridge = join(dirname(fileURLToPath(import.meta.url)), 'clone_speak.py');
+
+  if (dryRun) {
+    for (const seg of plan) console.log(`  [${seg.note}] speed=${seg.rate.toFixed(2)} pause=${seg.pause}s  ${seg.sentence.slice(0, 40)}${seg.sentence.length > 40 ? '…' : ''}`);
+    console.log(`(clone 引擎 · ${voiceName}，F5-TTS-MLX，${plan.length} 句)`);
+    return;
+  }
+  rmSync(TMP_DIR, { recursive: true, force: true });
+  mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 });
+  console.log(`克隆朗读中（${voiceName} · F5，${plan.length} 句，逐句合成约 ${plan.length * 15}s，念得慢但像哦）…`);
+  for (const [i, seg] of plan.entries()) {
+    const file = join(TMP_DIR, `${String(i).padStart(3, '0')}.wav`);
+    process.stderr.write(`\r合成中 ${i + 1}/${plan.length}…`);
+    try {
+      execFileSync(F5_PY, [
+        bridge,
+        '--ref', ref,
+        '--ref-text', refText,
+        '--text', seg.sentence,
+        '--out', file,
+        '--estimate-duration', // 中文必须：默认时长预测器严重偏短
+        ...(seg.rate !== 1 ? ['--speed', seg.rate.toFixed(2)] : []),
+      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+    } catch (error) {
+      console.error(`\n第 ${i + 1} 句合成失败：${String(error?.message ?? error).slice(0, 300)}`);
+      process.exit(2);
+    }
+    process.stderr.write('\r播放中 ' + ' '.repeat(20) + '\r');
+    try {
+      execFileSync('afplay', [file], { stdio: 'ignore' });
+    } catch { break; } // 被 stop 杀掉
+    if (i < plan.length - 1 && seg.pause > 0) await nap(seg.pause);
+  }
+  rmSync(TMP_DIR, { recursive: true, force: true });
+  console.log('克隆朗读完毕');
+};
 
 const pickDefaultSayVoice = (voices) => {
   const saved = loadConfig().voiceSay;
@@ -104,15 +190,17 @@ const usage = () => {
   console.error(`用法：
   node tts.mjs voices [--lang zh]        列出 say 可用音色（* 为当前默认）
   node tts.mjs speak [options] [text]    朗读；文本缺省时读 stdin
-      --engine auto|edge|say   默认 auto（edge 可用则用 edge）
-      --voice <name>           音色（edge: zh-CN-XiaoxiaoNeural；say: 系统音色名）
+      --engine auto|edge|say|clone  默认 auto（指定 clone 音色名时自动用 clone）
+      --voice <name>           音色（clone: 注册名；edge: zh-CN-XiaoxiaoNeural；say: 系统音色名）
       --mood calm|happy|sad|excited|angry|tsundere|sajiao   情绪基调（默认 calm）
       --rate <wpm 或 ±%>       say: wpm（默认 200）；edge: ±%
       --file <path>            从 utf-8 文件读取文本
       --dry-run                只打印韵律计划
   node tts.mjs stop                          停止朗读
-  node tts.mjs set-voice <name> [--engine say|edge]   记住音色
-  node tts.mjs set-mood <mood>               记住情绪基调`);
+  node tts.mjs set-voice <name> [--engine say|edge|clone]   记住音色
+  node tts.mjs set-mood <mood>               记住情绪基调
+  node tts.mjs clone-voice --name <id> --audio <音频> --ref-text "<参考音频台词>"
+      注册 F5 克隆音色（任意格式音频自动转 24kHz；台词必须与音频内容一致）`);
 };
 
 const parseArgs = (argv) => {
@@ -312,6 +400,18 @@ const main = async () => {
       console.log(`${mark} ${v.name}\t${v.lang}\t${v.sample}`);
     }
     console.log(`# edge 引擎${edgeAvailable() ? '：可用' : '：未安装（venv 缺失）'}，默认 ${pickDefaultEdgeVoice()}`);
+    const cv = cloneVoices();
+    console.log(`# clone 引擎${cloneAvailable() ? '：可用' : '：未就绪'}，已注册音色：${cv.length > 0 ? cv.join(', ') : '（无）'}`);
+    return;
+  }
+
+  if (cmd === 'clone-voice') {
+    // node tts.mjs clone-voice --name xishi --audio /path/voice.wav --ref-text "参考音频台词原文"
+    const get = (key) => {
+      const i = rest.indexOf(key);
+      return i >= 0 ? rest[i + 1] : undefined;
+    };
+    registerCloneVoice(get('--name') ?? '', get('--audio') ?? '', get('--ref-text') ?? '');
     return;
   }
 
@@ -324,8 +424,9 @@ const main = async () => {
     }
     if (!name) { console.error('set-voice 需要音色名'); process.exit(1); }
     if (flags.engine === 'edge') saveConfig({ voiceEdge: name });
+    else if (flags.engine === 'clone') saveConfig({ voiceClone: name });
     else saveConfig({ voiceSay: name });
-    console.log(`已记住${flags.engine === 'edge' ? ' edge' : ' say'} 音色：${name}`);
+    console.log(`已记住${flags.engine ? ` ${flags.engine}` : ''} 音色：${name}`);
     return;
   }
 
@@ -358,10 +459,22 @@ const main = async () => {
 
     const config = loadConfig();
     const mood = opts.mood && opts.mood in MOODS ? opts.mood : (config.mood in MOODS ? config.mood : 'calm');
-    const engine = opts.engine === 'edge' || opts.engine === 'say'
+    // 引擎优先级：显式 --engine > 显式 clone 音色名 > 配置的默认克隆音色（set-voice --engine clone
+    // 设过就一直是主嗓） > edge > say
+    const namedClone = opts.voice !== undefined && cloneVoices().includes(opts.voice);
+    const defaultClone = typeof config.voiceClone === 'string' && cloneVoices().includes(config.voiceClone);
+    const engine = opts.engine && ['edge', 'say', 'clone'].includes(opts.engine)
       ? opts.engine
-      : (edgeAvailable() ? 'edge' : 'say');
+      : (namedClone || (defaultClone && cloneAvailable()) ? 'clone' : (edgeAvailable() ? 'edge' : 'say'));
 
+    if (engine === 'clone') {
+      if (!cloneAvailable()) { console.error('clone 引擎未就绪（缺 venv-f5 或音色库）'); process.exit(1); }
+      const voice = opts.voice ?? config.voiceClone ?? cloneVoices()[0];
+      if (!voice) { console.error('没有注册过克隆音色：node tts.mjs clone-voice --name xx --audio xx --ref-text "…"'); process.exit(1); }
+      const plan = planProsody(cleaned, mood);
+      await speakClone(plan, voice, opts.dryRun);
+      return;
+    }
     if (engine === 'edge') {
       const voice = opts.voice ?? pickDefaultEdgeVoice();
       const plan = planProsody(cleaned, mood);

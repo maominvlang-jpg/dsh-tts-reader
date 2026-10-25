@@ -21,12 +21,21 @@ metadata:
 
 ### 引擎与情绪
 
-双引擎，`--engine auto`（默认）自动选择：
+三引擎，`--engine auto`（默认）自动选择：
 
-- **edge**（默认，需联网）：微软 Edge 神经语音 `zh-CN-XiaoxiaoNeural`（晓晓），自然、有起伏；逐句合成后按序播放
-- **say**（离线兜底）：macOS 原生 `say`，自动优先 Premium（Yue）> Enhanced（田田）> 婆婆音色
+- **clone（当前默认嗓音！）**：F5-TTS-MLX 零样本克隆。已注册音色 **`xishi`（王者荣耀西施台词克隆，20 秒素材）**，`set-voice xishi --engine clone` 已设为默认——**不带 `--voice` 的 speak 就是用西施的声音念**。慢（每句合成 15~50 秒）但音色是克隆的
+- **edge**（联网）：微软神经语音 `zh-CN-XiaoxiaoNeural`（晓晓），快而自然；克隆引擎不可用或要快速朗读时用 `--engine edge`
+- **say**（离线兜底）：macos 原生 `say`，优先 Premium（Yue）> Enhanced（田田）
 
-**逐句韵律自动调制**（两个引擎都生效）：问句升调、感叹句提速提调、省略号结尾放慢降调、40 字以上长句中段降速。再叠加情绪基调 `--mood`：
+**克隆音色管理**：
+```bash
+node tts.mjs clone-voice --name <id> --audio <任意音频> --ref-text "<音频里台词原文>"  # 注册
+node tts.mjs voices    # 末行显示 clone 引擎状态与已注册音色
+# 换回晓晓：node tts.mjs set-voice zh-CN-XiaoxiaoNeural --engine edge
+```
+克隆素材要求：10~60 秒、尽量无 BGM；`--ref-text` 必须与音频内容一致（SenseVoice 可转写）。西施素材来自用户提供的台词合集 mp4，切了 0~20.28s 最干净的一段（无 BGM，-70dB 底噪）。
+
+**逐句韵律自动调制**（三个引擎都生效）：问句升调、感叹句提速提调、省略号结尾放慢降调、40 字以上长句中段降速。再叠加情绪基调 `--mood`：
 
 | mood | 效果 |
 |---|---|
