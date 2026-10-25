@@ -19,27 +19,47 @@ metadata:
 
 ## 一、朗读（tts.mjs）
 
+### 引擎与情绪
+
+双引擎，`--engine auto`（默认）自动选择：
+
+- **edge**（默认，需联网）：微软 Edge 神经语音 `zh-CN-XiaoxiaoNeural`（晓晓），自然、有起伏；逐句合成后按序播放
+- **say**（离线兜底）：macOS 原生 `say`，自动优先 Premium（Yue）> Enhanced（田田）> 婆婆音色
+
+**逐句韵律自动调制**（两个引擎都生效）：问句升调、感叹句提速提调、省略号结尾放慢降调、40 字以上长句中段降速。再叠加情绪基调 `--mood`：
+
+| mood | 效果 |
+|---|---|
+| `calm`（默认） | 平稳叙述 |
+| `happy` | 提速 +8%，升调 |
+| `excited` | 提速 +18%，大幅升调 |
+| `sad` | 放慢 12%，降调 |
+| `angry` | 提速 +10%，降调加重音量 |
+
+`node tts.mjs set-mood happy` 可记住默认基调。**用户抱怨「没感情/太平」时，先换 edge 引擎 + happy/excited 基调。**
+
 ### 列音色
 
 ```bash
-node tts.mjs voices --lang zh    # 中文优先排列，* 标记当前默认
+node tts.mjs voices --lang zh    # say 音色列表，* 标记当前默认；末行显示 edge 状态
 ```
-
-高品质中文声音推荐（macOS 需先在 `系统设置 → 辅助功能 → 朗读内容 → 管理语音` 下载）：`Tiantian (Enhanced)`（田田增强版）、`Tingting`（婷婷）、Siri 系列。默认自动选择顺序：记住的音色 > Siri/增强版 > Tiantian > Tingting > 任意中文。
 
 ### 朗读文本
 
 ```bash
-node tts.mjs speak "要朗读的文字"                    # 直接念
-node tts.mjs speak --voice Tingting --rate 200 "…"  # 指定音色与语速（wpm，默认 200）
-node tts.mjs speak --file /path/to/article.md       # 朗读整个文件
-cat some.txt | node tts.mjs speak                   # 管道输入
-node tts.mjs speak --dry-run "…"                    # 先预览净化后的文本，不真念
+node tts.mjs speak "要朗读的文字"                          # auto 引擎（edge 优先）
+node tts.mjs speak --mood happy "…"                       # 带情绪
+node tts.mjs speak --engine say --voice "Yue (Premium)" "…"  # 指定 say 音色
+node tts.mjs speak --engine edge --voice zh-CN-YunxiNeural "…"  # 换 edge 音色（男声云希等）
+node tts.mjs speak --file /path/to/article.md             # 朗读整个文件
+cat some.txt | node tts.mjs speak                         # 管道输入
+node tts.mjs speak --dry-run --mood happy "…"             # 先看逐句韵律计划，不真念
 ```
 
 - **前台阻塞直到念完**，所以长文朗读时不要再并发执行其它 speak
 - 自动净化：代码块只去围栏保留正文（歌词不丢）、链接只留文字、网址/markdown 记号/装饰符号（《》～【】☆★等）不念
-- 记住音色：`node tts.mjs set-voice "Tiantian (Enhanced)"`
+- 记住音色：`node tts.mjs set-voice "Yue (Premium)"`（say）或 `node tts.mjs set-voice zh-CN-XiaoxiaoNeural --engine edge`
+- edge 每句合成需要 1~2 秒网络请求，多句文本先打印「合成中 n/N」
 
 ### 停止朗读
 

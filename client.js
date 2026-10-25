@@ -212,6 +212,14 @@ window.__ModuleLoader__.load({
     };
 
     let keepAlive = null;
+    /**
+     * Monotonic token for the newest utterance. `cancel()` races in Chromium:
+     * a superseded utterance fires `onend` late (after `synth.cancel()`), and
+     * without this guard that stale settle cleared the shared state while the
+     * replacing utterance was still speaking — which made the auto-read guard
+     * see "idle" and start a second, overlapping voice.
+     */
+    let utteranceToken = 0;
     function clearKeepAlive() {
       if (keepAlive !== null) {
         clearInterval(keepAlive);
@@ -358,8 +366,16 @@ window.__ModuleLoader__.load({
         if (voice !== null) utter.voice = voice;
         utter.lang = voice?.lang ?? (/^[一-鿿]/.test(clean) ? 'zh-CN' : 'en-US');
         utter.rate = 1;
-        utter.onend = () => { clearKeepAlive(); speech.clear(); };
-        utter.onerror = () => { clearKeepAlive(); speech.clear(); };
+        // Only the CURRENT utterance may settle the shared state; a cancelled
+        // (superseded) one firing `onend` late must not clear the newer state.
+        const token = ++utteranceToken;
+        const settle = () => {
+          if (token !== utteranceToken) return; // stale: a newer voice took over
+          clearKeepAlive();
+          speech.clear();
+        };
+        utter.onend = settle;
+        utter.onerror = settle;
         speech.start(typeof sid === 'string' && sid !== '' ? sid : answered);
         synth.speak(utter);
         // Chrome stops long utterances after ~15s unless nudged; pause/resume
@@ -444,6 +460,10 @@ window.__ModuleLoader__.load({
             const key = hashText(text);
             if (key === lastSeenRef.current) return; // same reply, already read
             lastSeenRef.current = key;
+            // The fetch above is async: the manual button (or an earlier poll)
+            // may have STARTED speaking while it was in flight. Re-check here
+            // or we'd cancel+restart and Chromium could play both at once.
+            if (speech.speaking) return;
             speakText(text, sid, String(data.session ?? ''));
           } catch {}
         };
@@ -506,7 +526,9 @@ window.__ModuleLoader__.load({
           onClick: toggleAutoRead,
           title: t('autoRead'),
         }, h('span', {}, autoRead ? '🔔' : '🔕'), h('span', {}, t('autoRead'))),
-        h(VoiceSelect, { translate }),
+        // Voice picker hidden on request: the default voice is remembered in
+        // savedVoiceUri(), and switching is done by asking the agent.
+        null,
         h(SingPanel, { translate, getSessionId }),
         hint !== '' ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, hint) : null);
     }

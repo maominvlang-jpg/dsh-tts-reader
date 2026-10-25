@@ -9,7 +9,7 @@
 - **按会话朗读**：在哪个会话点按钮，读的就是那个会话的最新一条回复；历史会话也能读（自动从磁盘日志回溯）
 - **切换会话自动停止**：朗读中切到别的会话，声音立刻停
 - **内容净化**：代码块正文照念（歌词不会漏），但图标 emoji、装饰标点（《》～【】等）、图片、网址、markdown 标记一律不念；`，。！？` 等只作停顿
-- **音色选择器**：下拉切换系统所有可用语音（中文优先），选择自动记住
+- **音色记忆**：选择的语音按 voiceURI 自动记住；界面下拉框默认隐藏（切换音色可通过 `localStorage` 的 `dsh-tts-reader.voice` 或让 Agent 代改）
 - **🎤 唱歌（本机免费）**：基于开源音乐模型 ACE-Step 1.5（MLX 版，Apple 芯片原生），输入歌词和风格，本机生成带人声伴奏的完整歌曲——免费、无限次、离线、数据不出本机
 - **🎤 唱歌（云端可选）**：也可切换到任意 Suno 兼容中转 API（需自备 Key）
 - **多语言界面**：按钮文案跟随 DSH 界面语言（中/英）
@@ -29,7 +29,7 @@ dsh plugin --profile desktop add github:maominvlang-jpg/dsh-tts-reader
 
 1. 打开任意会话，输入框下方找到 **「朗读最新回复」** 按钮（🔊 圆角胶囊）
 2. 点一下开始朗读，再点一下停止
-3. 旁边下拉框可换音色，选完立即生效
+3. 音色沿用上次的选择（界面不显示下拉框）；想换音色可让 Agent 修改 `localStorage` 的 `dsh-tts-reader.voice`
 4. 如果当前会话还没有回复、或找不到该会话，按钮旁会提示"改读最新一条"
 
 ### 🎤 唱歌功能
@@ -54,7 +54,7 @@ dsh plugin --profile desktop add github:maominvlang-jpg/dsh-tts-reader
 
 浏览器只能用系统已装的语音。推荐在 macOS 上下载高品质中文语音：
 
-`系统设置 → 辅助功能 → 朗读内容 → 管理语音 → 中文`，勾选 **Siri 声音** 或 **婷婷（高级版）**，下载完成后在插件下拉框里选中即可。
+`系统设置 → 辅助功能 → 朗读内容 → 管理语音 → 中文`，勾选 **Siri 声音** 或 **婷婷（高级版）**，下载完成后让 Agent 选中它即可。
 
 ## 🧠 Skill 版（Agent 直接驱动）
 
@@ -78,7 +78,7 @@ mkdir -p ~/.dsh/skills && cp -R skill ~/.dsh/skills/dsh-tts-reader
 ```
 Host 半边 (index.js)                     Client 半边 (client.js)
 ──────────────────────                   ──────────────────────
-监听 session/event 事件流                 注册「朗读」按钮 + 音色下拉框
+监听 session/event 事件流                 注册「朗读」按钮（音色下拉框已隐藏）
   └ 缓存每个会话的最新回复                  到 conversation.composer.dock
 未命中时按需回溯：                          点击时取当前会话 id，
   内存会话 → 磁盘日志回放                   fetch /dsh-tts/latest?session=<id>

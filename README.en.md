@@ -7,7 +7,7 @@ Adds a **"Read aloud" button** to [DeepSeek Harness (DSH)](https://github.com/de
 - **Per-conversation reading**: click in a conversation and it reads that conversation's newest reply; idle conversations work too (falls back to reading the on-disk session log)
 - **Stops on conversation switch**: switching conversations mid-speech stops the voice immediately
 - **Cleaned-up speech**: code-block CONTENT is read (lyrics are not lost), while icons/emojis, decorative punctuation (《》～ 【】 etc.), images, URLs and markdown markup are never spoken; `，。！？` act as pauses only
-- **Voice picker**: a dropdown lists every system voice (Chinese first) and remembers your choice
+- **Voice memory**: your chosen voice is remembered by voiceURI; the picker dropdown is hidden by default (switch via the `dsh-tts-reader.voice` localStorage key, or let the Agent do it)
 - **🎤 Sing (local, free)**: powered by the open-source ACE-Step 1.5 music model (MLX build, native on Apple Silicon) — type lyrics and a style and get a full vocal track on your machine: free, unlimited, offline, nothing leaves your computer
 - **🎤 Sing (cloud, optional)**: switch to any Suno-compatible API reseller (bring your own key)
 - **Localized UI**: button labels follow the DSH interface language (zh/en)
@@ -26,7 +26,7 @@ Then **restart DSH** and do a **hard refresh (Ctrl/Cmd+Shift+R)** — DSH caches
 
 1. Open any conversation; the **Read latest reply** pill sits below the message composer
 2. Click to start, click again to stop
-3. Use the dropdown next to it to switch voices
+3. The voice from your last choice is reused (no dropdown is shown); to switch, have the Agent update the `dsh-tts-reader.voice` localStorage key
 4. When a conversation has no reply yet, the button says so and reads the newest one instead
 
 ### 🎤 Singing
