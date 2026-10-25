@@ -12,6 +12,7 @@
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { stat, createReadStream } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 export const inject = ['webServer'];
@@ -225,13 +226,18 @@ export function apply(ctx) {
     });
   };
 
-  // ── Singing: cloud music generation over a Suno-compatible API ──────────
-  // API key and endpoint live in ~/.dsh/dsh-tts-reader/config.json (mode 600)
-  // and never leave this machine; audio streams from the provider's CDN.
+  // ── Singing: music generation, cloud (Suno-compatible) or LOCAL ─────────
+  // Local mode talks to mlx-serve's ACE-Step endpoint on this machine
+  // (free, offline); cloud mode talks to any Suno-compatible reseller.
+  // API key and endpoints live in ~/.dsh/dsh-tts-reader/config.json (mode
+  // 600) and never leave this machine.
 
   const CONFIG_DIR = join(homedir(), '.dsh', 'dsh-tts-reader');
   const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+  const SONGS_DIR = join(CONFIG_DIR, 'songs');
   const DEFAULT_BASE = 'https://api.sunoapi.org';
+  const DEFAULT_LOCAL_BASE = 'http://127.0.0.1:8080';
+  const DEFAULT_LOCAL_MODEL = 'ACE-Step-1.5-XL-Turbo-MLX-Serve-8bit';
 
   let configCache = null;
   const loadConfig = async () => {
@@ -298,8 +304,11 @@ export function apply(ctx) {
       sendJson(res, {
         ok: true,
         configured: typeof config.apiKey === 'string' && config.apiKey !== '',
+        provider: config.provider === 'local' ? 'local' : 'cloud',
         baseUrl: typeof config.baseUrl === 'string' ? config.baseUrl : DEFAULT_BASE,
         model: typeof config.model === 'string' ? config.model : 'V6',
+        localBase: typeof config.localBase === 'string' ? config.localBase : DEFAULT_LOCAL_BASE,
+        localDuration: typeof config.localDuration === 'number' ? config.localDuration : 60,
       });
       return;
     }
@@ -318,8 +327,59 @@ export function apply(ctx) {
     if (typeof body.apiKey === 'string') patch.apiKey = body.apiKey.trim();
     if (typeof body.baseUrl === 'string' && /^https?:\/\//.test(body.baseUrl)) patch.baseUrl = body.baseUrl.trim().replace(/\/+$/, '');
     if (typeof body.model === 'string' && /^(V6|V6_MINI|V6_WILD)$/.test(body.model)) patch.model = body.model;
+    if (body.provider === 'local' || body.provider === 'cloud') patch.provider = body.provider;
+    if (typeof body.localBase === 'string' && /^https?:\/\//.test(body.localBase)) patch.localBase = body.localBase.trim().replace(/\/+$/, '');
+    if (typeof body.localDuration === 'number' && body.localDuration >= 10 && body.localDuration <= 600) patch.localDuration = Math.round(body.localDuration);
     const saved = await saveConfig(patch);
     sendJson(res, { ok: true, configured: typeof saved.apiKey === 'string' && saved.apiKey !== '' });
+  };
+
+  /** In-memory local-generation jobs: taskId -> { status, tracks, error }. */
+  const localJobs = new Map();
+  let localSeq = 0;
+
+  /** Run one ACE-Step generation through mlx-serve; stores the wav on disk. */
+  const runLocalJob = async (taskId, config, options) => {
+    const job = localJobs.get(taskId);
+    try {
+      const base = String(config.localBase || DEFAULT_LOCAL_BASE).replace(/\/+$/, '');
+      const res = await fetch(`${base}/v1/audio/music-generations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: typeof config.localModel === 'string' && config.localModel !== '' ? config.localModel : DEFAULT_LOCAL_MODEL,
+          prompt: options.style,
+          lyrics: options.lyrics,
+          vocal_language: 'zh',
+          duration_seconds: options.duration,
+        }),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          detail = (await res.text()).slice(0, 300);
+        } catch {}
+        job.status = 'GENERATE_AUDIO_FAILED';
+        job.error = `mlx-serve HTTP ${res.status} ${detail}`;
+        return;
+      }      const bytes = Buffer.from(await res.arrayBuffer());
+      if (bytes.length < 1024) {
+        job.status = 'GENERATE_AUDIO_FAILED';
+        job.error = 'mlx-serve returned empty audio';
+        return;
+      }
+      await mkdir(SONGS_DIR, { recursive: true, mode: 0o700 });
+      const fileName = `local-${taskId}.wav`;
+      await writeFile(join(SONGS_DIR, fileName), bytes, { mode: 0o600 });
+      job.status = 'SUCCESS';
+      job.tracks = [{ id: taskId, title: options.title, duration: options.duration, url: `/dsh-tts/local-song/${fileName}` }];
+    } catch (error) {
+      job.status = 'GENERATE_AUDIO_FAILED';
+      const message = String(error?.message ?? error);
+      job.error = /fetch failed|ECONNREFUSED|ECONNRESET/i.test(message)
+        ? '本机引擎未启动（mlx-serve）。运行：mlx-serve --serve --port 8080 --model-dir ~/.mlx-serve/models --skip-mem-preflight'
+        : message;
+    }
   };
 
   const singStartHandler = async (req, res) => {
@@ -335,11 +395,12 @@ export function apply(ctx) {
       return;
     }
     const config = await loadConfig();
+    const provider = body.provider === 'local' || body.provider === 'cloud' ? body.provider : (config.provider === 'local' ? 'local' : 'cloud');
     if (typeof body.apiKey === 'string' && body.apiKey.trim() !== '') await saveConfig({ apiKey: body.apiKey.trim() });
-    const apiKey = typeof body.apiKey === 'string' && body.apiKey.trim() !== '' ? body.apiKey.trim() : config.apiKey;
-    if (typeof apiKey !== 'string' || apiKey === '') {
-      sendJson(res, { ok: false, error: 'no-api-key' });
-      return;
+    if (body.provider === 'local' || body.provider === 'cloud' || typeof body.localDuration === 'number') {
+      const patch = { provider };
+      if (typeof body.localDuration === 'number' && body.localDuration >= 10 && body.localDuration <= 600) patch.localDuration = Math.round(body.localDuration);
+      await saveConfig(patch);
     }
     const lyrics = typeof body.lyrics === 'string' ? body.lyrics.slice(0, 5000) : '';
     const style = typeof body.style === 'string' ? body.style.slice(0, 1000) : '';
@@ -347,6 +408,25 @@ export function apply(ctx) {
     const vocalGender = body.vocalGender === 'm' || body.vocalGender === 'f' ? body.vocalGender : undefined;
     if (lyrics === '' && style === '') {
       sendJson(res, { ok: false, error: 'lyrics-or-style required' });
+      return;
+    }
+
+    if (provider === 'local') {
+      const fresh = await loadConfig();
+      const localBase = typeof body.localBase === 'string' && /^https?:\/\//.test(body.localBase) ? body.localBase.trim().replace(/\/+$/, '') : (typeof fresh.localBase === 'string' ? fresh.localBase : DEFAULT_LOCAL_BASE);
+      if (typeof body.localBase === 'string' && /^https?:\/\//.test(body.localBase)) await saveConfig({ localBase });
+      const duration = typeof body.localDuration === 'number' && body.localDuration >= 10 && body.localDuration <= 600 ? Math.round(body.localDuration) : (typeof fresh.localDuration === 'number' ? fresh.localDuration : 60);
+      localSeq += 1;
+      const taskId = `local-${Date.now()}-${localSeq}`;
+      localJobs.set(taskId, { status: 'PENDING', tracks: [], error: null });
+      void runLocalJob(taskId, { ...fresh, localBase }, { lyrics, style, title, duration });
+      sendJson(res, { ok: true, taskId });
+      return;
+    }
+
+    const apiKey = typeof body.apiKey === 'string' && body.apiKey.trim() !== '' ? body.apiKey.trim() : config.apiKey;
+    if (typeof apiKey !== 'string' || apiKey === '') {
+      sendJson(res, { ok: false, error: 'no-api-key' });
       return;
     }
     const payload = {
@@ -358,17 +438,17 @@ export function apply(ctx) {
       ...(title !== '' ? { title } : {}),
       ...(vocalGender !== undefined ? { vocalGender } : {}),
     };
-    const { status, payload: provider } = await providerCall({ ...config, apiKey }, '/api/v1/generate', {
+    const { status, payload: providerPayload } = await providerCall({ ...config, apiKey }, '/api/v1/generate', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    const taskId = provider?.data?.taskId;
+    const taskId = providerPayload?.data?.taskId;
     if ((status !== 200 && status !== 201) || typeof taskId !== 'string') {
       sendJson(res, {
         ok: false,
         providerStatus: status,
-        providerCode: typeof provider?.code === 'number' ? provider.code : null,
-        providerMsg: typeof provider?.msg === 'string' ? provider.msg : typeof provider?.message === 'string' ? provider.message : null,
+        providerCode: typeof providerPayload?.code === 'number' ? providerPayload.code : null,
+        providerMsg: typeof providerPayload?.msg === 'string' ? providerPayload.msg : typeof providerPayload?.message === 'string' ? providerPayload.message : null,
       });
       return;
     }
@@ -386,6 +466,16 @@ export function apply(ctx) {
     } catch {}
     if (typeof taskId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(taskId)) {
       sendJson(res, { ok: false, error: 'bad taskId' }, 400);
+      return;
+    }
+    // Local (mlx-serve) jobs answer from memory — no API key involved.
+    if (taskId.startsWith('local-')) {
+      const job = localJobs.get(taskId);
+      if (job === undefined) {
+        sendJson(res, { ok: false, error: 'unknown local job' }, 404);
+        return;
+      }
+      sendJson(res, { ok: true, status: job.status, tracks: job.tracks, error: job.error });
       return;
     }
     const config = await loadConfig();
@@ -425,12 +515,42 @@ export function apply(ctx) {
     });
   };
 
+  /** Serve one locally generated song (name is strictly validated). */
+  const localSongHandler = (req, res) => {
+    if (req.method !== 'GET') {
+      sendJson(res, { ok: false, error: 'GET required' }, 405);
+      return;
+    }
+    let name = null;
+    try {
+      name = new URL(req.url ?? '/', 'http://localhost').pathname.slice('/dsh-tts/local-song/'.length);
+    } catch {}
+    if (typeof name !== 'string' || !/^local-[A-Za-z0-9._-]{1,120}\.wav$/.test(name)) {
+      sendJson(res, { ok: false, error: 'bad song name' }, 400);
+      return;
+    }
+    const file = join(SONGS_DIR, name);
+    stat(file, (error, info) => {
+      if (error !== null || !info.isFile()) {
+        sendJson(res, { ok: false, error: 'not found' }, 404);
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': 'audio/wav',
+        'content-length': String(info.size),
+        'cache-control': 'no-store',
+      });
+      createReadStream(file).pipe(res);
+    });
+  };
+
   ctx.effect(() => {
     const offs = [
       ctx.webServer.register({ kind: 'prefix', path: ROUTE, handler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-config', handler: configHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-start', handler: singStartHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-status', handler: singStatusHandler }),
+      ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/local-song', handler: localSongHandler }),
     ];
     return () => {
       for (const off of offs) {

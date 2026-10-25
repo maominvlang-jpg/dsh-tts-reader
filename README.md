@@ -10,7 +10,8 @@
 - **切换会话自动停止**：朗读中切到别的会话，声音立刻停
 - **内容净化**：代码块正文照念（歌词不会漏），但图标 emoji、装饰标点（《》～【】等）、图片、网址、markdown 标记一律不念；`，。！？` 等只作停顿
 - **音色选择器**：下拉切换系统所有可用语音（中文优先），选择自动记住
-- **🎤 唱歌**：输入歌词和风格，调用 Suno 兼容 API 生成带人声伴奏的完整歌曲并直接播放（需自备 API Key，见下）
+- **🎤 唱歌（本机免费）**：基于开源音乐模型 ACE-Step 1.5（MLX 版，Apple 芯片原生），输入歌词和风格，本机生成带人声伴奏的完整歌曲——免费、无限次、离线、数据不出本机
+- **🎤 唱歌（云端可选）**：也可切换到任意 Suno 兼容中转 API（需自备 Key）
 - **多语言界面**：按钮文案跟随 DSH 界面语言（中/英）
 
 ## 安装
@@ -31,14 +32,23 @@ dsh plugin --profile desktop add github:maominvlang-jpg/dsh-tts-reader
 3. 旁边下拉框可换音色，选完立即生效
 4. 如果当前会话还没有回复、或找不到该会话，按钮旁会提示"改读最新一条"
 
-### 🎤 唱歌功能（可选，需 API Key）
+### 🎤 唱歌功能
 
-1. 在 [sunoapi.org](https://sunoapi.org)（或任何 Suno 兼容中转站）注册并充值，复制 **API Key**
-2. 点输入框下方的「🎤 唱歌」→ 在面板里粘贴 Key → 保存
-3. 填**风格**（如 `慵懒民谣 女声 温暖`），**歌词**可留空让 AI 自动写词 → 点「生成歌曲」
-4. 约 1~2 分钟后自动播放；一次生成两个版本
+面板顶部可选模式：
 
-说明：API Key 保存在你本机 `~/.dsh/dsh-tts-reader/config.json`（权限 600），不进 git、不上传；歌曲由第三方服务生成，按其定价计费（通常每首几毛到两元）。朗读和唱歌互斥——一个响，另一个自动停；切换会话两者都会停止。
+**💻 本机（免费，推荐）** —— 无需任何账号：
+1. 安装引擎（一次性）：
+   ```sh
+   brew tap ddalcu/mlx-serve https://github.com/ddalcu/mlx-serve
+   brew trust ddalcu/mlx-serve && brew install mlx-serve
+   ```
+2. 下载模型（一次性，约 6.6GB）到 `~/.mlx-serve/models/ACE-Step-1.5-XL-Turbo-MLX-Serve-8bit/`（可在 HuggingFace 或 hf-mirror.com 获取）
+3. 启动引擎：`mlx-serve --serve --port 8080 --model-dir ~/.mlx-serve/models --skip-mem-preflight`（建议做成 LaunchAgent 开机自启）
+4. 面板选「💻 本机」→ 填风格 → 填歌词（留空 = 纯音乐）→ 生成。M 系列芯片约 4 秒可生成 30 秒歌曲
+
+**☁️ 云端（Suno 中转）**：在 [sunoapi.org](https://sunoapi.org) 等兼容中转站注册充值 → 面板粘贴 API Key → 填风格和歌词 → 生成。按其定价计费
+
+说明：本机模式完全离线，歌曲缓存在 `~/.dsh/dsh-tts-reader/songs/`；朗读和唱歌互斥，切换会话两者都停。
 
 ### 想要更好听的音色
 

@@ -33,6 +33,10 @@ window.__ModuleLoader__.load({
         songReady: '生成完成，开始播放 🎵',
         songFailed: '生成失败',
         stopSong: '⏹ 停止播放',
+        modeCloud: '☁️ 云端（Suno）',
+        modeLocal: '💻 本机（免费）',
+        duration: '时长(秒)',
+        localNote: '本机模式：歌词留空 = 纯音乐；生成比云端快',
       },
       en: {
         speak: 'Read latest reply',
@@ -59,6 +63,10 @@ window.__ModuleLoader__.load({
         songReady: 'Done, playing 🎵',
         songFailed: 'Generation failed',
         stopSong: '⏹ Stop playback',
+        modeCloud: '☁️ Cloud (Suno)',
+        modeLocal: '💻 Local (free)',
+        duration: 'Length (s)',
+        localNote: 'Local mode: empty lyrics = instrumental; usually faster than cloud',
       },
     };
 
@@ -449,6 +457,8 @@ window.__ModuleLoader__.load({
       const [gender, setGender] = React.useState('');
       const [apiKey, setApiKey] = React.useState('');
       const [configured, setConfigured] = React.useState(null);
+      const [provider, setProvider] = React.useState('cloud');
+      const [duration, setDuration] = React.useState(60);
       const [busy, setBusy] = React.useState(false);
       const [playing, setPlaying] = React.useState(false);
       const [status, setStatus] = React.useState('');
@@ -457,7 +467,11 @@ window.__ModuleLoader__.load({
         if (!open) return undefined;
         fetch('/dsh-tts/sing-config', { cache: 'no-store' })
           .then((r) => r.json())
-          .then((d) => setConfigured(d?.configured === true))
+          .then((d) => {
+            setConfigured(d?.configured === true);
+            if (d?.provider === 'local' || d?.provider === 'cloud') setProvider(d.provider);
+            if (typeof d?.localDuration === 'number') setDuration(d.localDuration);
+          })
           .catch(() => setConfigured(false));
         return () => {};
       }, [open]);
@@ -487,8 +501,10 @@ window.__ModuleLoader__.load({
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
+              provider,
               lyrics,
               style,
+              localDuration: duration,
               ...(gender !== '' ? { vocalGender: gender } : {}),
               ...(apiKey.trim() !== '' ? { apiKey: apiKey.trim() } : {}),
             }),
@@ -596,21 +612,43 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
           h('select', {
             style: { ...inputStyle, width: 'auto' },
-            value: gender,
-            onChange: (e) => setGender(e.target.value),
-            'aria-label': t('singGender'),
+            value: provider,
+            onChange: (e) => setProvider(e.target.value),
+            'aria-label': 'provider',
           },
-          h('option', { value: '' }, t('genderAuto')),
-          h('option', { value: 'm' }, t('genderM')),
-          h('option', { value: 'f' }, t('genderF'))),
-          h('input', {
-            style: { ...inputStyle, width: '160px' },
-            type: 'password',
-            placeholder: configured === true ? '••••••••' : t('apiKey'),
-            value: apiKey,
-            onChange: (e) => setApiKey(e.target.value),
-          }),
+          h('option', { value: 'local' }, t('modeLocal')),
+          h('option', { value: 'cloud' }, t('modeCloud'))),
+          provider === 'local'
+            ? h('label', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', display: 'flex', gap: '4px', alignItems: 'center' } },
+              t('duration'),
+              h('input', {
+                style: { ...inputStyle, width: '56px' },
+                type: 'number',
+                min: 10,
+                max: 600,
+                value: String(duration),
+                onChange: (e) => setDuration(Number(e.target.value) || 60),
+              }))
+            : h('select', {
+              style: { ...inputStyle, width: 'auto' },
+              value: gender,
+              onChange: (e) => setGender(e.target.value),
+              'aria-label': t('singGender'),
+            },
+            h('option', { value: '' }, t('genderAuto')),
+            h('option', { value: 'm' }, t('genderM')),
+            h('option', { value: 'f' }, t('genderF'))),
         ),
+        provider === 'cloud'
+          ? h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
+            h('input', {
+              style: { ...inputStyle, width: '160px' },
+              type: 'password',
+              placeholder: configured === true ? '••••••••' : t('apiKey'),
+              value: apiKey,
+              onChange: (e) => setApiKey(e.target.value),
+            }))
+          : h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('localNote')),
         h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
           h('button', {
             type: 'button',
