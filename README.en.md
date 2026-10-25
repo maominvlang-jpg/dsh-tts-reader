@@ -50,7 +50,7 @@ Notes: local mode is fully offline; songs are cached in `~/.dsh/dsh-tts-reader/s
 ### Better voices
 
 Browsers can only use installed system voices. On macOS, download premium Chinese voices under
-`System Settings → Accessibility → Spoken Content → Manage Voices → Chinese` (Siri voices or Tingting), then pick them in the dropdown.
+`System Settings → Accessibility → Spoken Content → Manage Voices → Chinese` (Siri voices or Tingting), then have the Agent select it.
 
 ## 🧠 Skill edition (agent-driven)
 
@@ -73,7 +73,7 @@ The plugin and the skill coexist without conflicts.
 ```
 Host half (index.js)                      Client half (client.js)
 ───────────────────                       ───────────────────────
-listens to session/event feeds            registers the button + voice picker
+listens to session/event feeds            registers the button (voice picker hidden)
   caches each conversation's newest         into conversation.composer.dock
   assistant reply                          on click: resolve the shown session id,
 on miss: memory session →                    fetch /dsh-tts/latest?session=<id>
