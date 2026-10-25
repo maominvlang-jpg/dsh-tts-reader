@@ -449,26 +449,49 @@ window.__ModuleLoader__.load({
         const synth = window.speechSynthesis;
         stopSong(); // one voice at a time: starting speech stops any song
         try { synth.cancel(); } catch {}
-        const utter = new SpeechSynthesisUtterance(clean);
-        const voice = chooseVoice(synth, clean);
-        if (voice !== null) utter.voice = voice;
-        utter.lang = voice?.lang ?? (/^[一-鿿]/.test(clean) ? 'zh-CN' : 'en-US');
-        utter.rate = 1;
-        // Only the CURRENT utterance may settle the shared state; a cancelled
-        // (superseded) one firing `onend` late must not clear the newer state.
+        // Speak paragraph by paragraph with a real breath in between: one
+        // utterance for the whole reply gave the engine no reason to pause at
+        // line breaks, so long replies ran on without any rest.
+        const paragraphs = clean.split(/\n+/).map((s) => s.trim()).filter((s) => s !== '');
+        const segments = paragraphs.length > 0 ? paragraphs : [clean];
+        // Only the CURRENT sequence may settle the shared state; a cancelled
+        // (superseded) utterance firing `onend` late must not clear the newer
+        // state nor advance the old queue.
         const token = ++utteranceToken;
-        const settle = () => {
-          if (token !== utteranceToken) return; // stale: a newer voice took over
-          clearKeepAlive();
-          speech.clear();
-        };
-        utter.onend = settle;
-        utter.onerror = settle;
         speech.start(typeof sid === 'string' && sid !== '' ? sid : answered);
-        synth.speak(utter);
+        clearKeepAlive();
+        let index = 0;
+        const speakNext = () => {
+          if (token !== utteranceToken) return; // stopped / superseded
+          if (index >= segments.length) {
+            clearKeepAlive();
+            speech.clear();
+            return;
+          }
+          const text = segments[index++];
+          const isLast = index >= segments.length;
+          const utter = new SpeechSynthesisUtterance(text);
+          const voice = chooseVoice(synth, text);
+          if (voice !== null) utter.voice = voice;
+          utter.lang = voice?.lang ?? (/^[一-鿿]/.test(text) ? 'zh-CN' : 'en-US');
+          utter.rate = 1;
+          const settle = () => {
+            if (token !== utteranceToken) return; // stale: a newer voice took over
+            if (isLast) {
+              clearKeepAlive();
+              speech.clear();
+              return;
+            }
+            // Paragraph break = catch your breath before the next one.
+            setTimeout(speakNext, 800);
+          };
+          utter.onend = settle;
+          utter.onerror = settle;
+          synth.speak(utter);
+        };
+        speakNext();
         // Chrome stops long utterances after ~15s unless nudged; pause/resume
         // while it is actually speaking keeps long replies alive.
-        clearKeepAlive();
         keepAlive = setInterval(() => {
           try {
             if (synth.speaking && !synth.paused) { synth.pause(); synth.resume(); }
