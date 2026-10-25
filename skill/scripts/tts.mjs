@@ -27,8 +27,8 @@
  * 退出码：0 成功；1 用法/环境错误；2 朗读失败。
  */
 
-import { execFileSync, spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -136,63 +136,81 @@ const readStdin = () => new Promise((resolve) => {
   if (process.stdin.isTTY) resolve(data);
 });
 
-/** 内容净化（与插件版一致的原则）。 */
+/** 内容净化（与插件版一致的原则）；保留段落分隔用于「喘气」。 */
 const cleanText = (text) => text
   .replace(/```[\s\S]*?```/g, (m) => m.replace(/```[a-z]*/g, ''))
   .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
   .replace(/https?:\/\/\S+/g, '')
   .replace(/[#*_`~>|\\-]+/g, ' ')
   .replace(/[《》【】「」『』·—…☆★♪]+/g, (m) => (m.includes('…') ? '……' : ''))
-  .replace(/\s+/g, ' ')
+  .replace(/[ \t]+/g, ' ')
+  .replace(/ ?\n ?/g, '\n')      // 行内换行保留为段落线索
+  .replace(/\n{3,}/g, '\n\n')
   .trim();
 
 /**
- * 逐句切分并标注韵律。每句得到 rate/pitch 的乘除偏移：
- *   ？句尾   —— 升调（疑问上扬）
- *   ！句尾   —— 提速提调（情绪释放）
- *   ……结尾  —— 放慢降调（意味深长）
- *   超过 40 字的长句中段 —— 轻微降速（喘气）
- * 基调 mood 在此之上整体偏移。
+ * 逐句切分并标注韵律与「呼吸」。先按空行分段，段内再按句末标点切句：
+ *   段落结束   —— 停 0.9 秒（大喘气，换段落的感觉）
+ *   ？句尾     —— 停 0.4 秒 + 升调（等回应的停顿）
+ *   ！句尾     —— 停 0.25 秒 + 提速提调
+ *   ……结尾     —— 停 0.7 秒 + 放慢降调（意味深长）
+ *   陈述句尾   —— 停 0.3 秒
+ *   超过 40 字的长句 —— 轻微降速（喘口气）
+ * 基调 mood 在此之上整体偏移，并微调停顿长短（sad 慢半拍、excited 紧凑）。
  */
 const planProsody = (text, mood) => {
   const base = MOODS[mood] ?? MOODS.calm;
-  // 按句末标点切（保留下一段的完整性）
-  const parts = String(text).split(/(?<=[。！？!?…])(?=\s*[^。！？!?…]|$)/u).filter((s) => s.trim() !== '');
-  return parts.map((raw) => {
-    const sentence = raw.trim();
-    let rate = 1 + base.rate;
-    let pitch = base.pitch;
-    let note = '';
-    if (/[？?][”"』」)]*\s*$/u.test(sentence)) { rate *= 0.97; pitch += 14; note = '问句升调'; }
-    else if (/[！!][”"』」)]*\s*$/u.test(sentence)) { rate *= 1.08; pitch += 8; note = '感叹提速'; }
-    else if (/…{1,2}\s*$/u.test(sentence)) { rate *= 0.85; pitch -= 8; note = '省略号放慢'; }
-    else if (sentence.length > 40) { rate *= 0.93; note = '长句降速'; }
-    else { note = '陈述'; }
-    return { sentence, rate, pitch, note };
-  });
+  const pauseScale = { calm: 1.0, happy: 0.9, excited: 0.65, sad: 1.25, angry: 0.8 }[mood] ?? 1.0;
+  const paragraphs = String(text).split(/\n+/).map((p) => p.trim()).filter((p) => p !== '');
+  const segs = [];
+  for (const [pi, para] of paragraphs.entries()) {
+    const isLastPara = pi === paragraphs.length - 1;
+    const parts = para.split(/(?<=[。！？!?…])(?=\s*[^。！？!?…]|$)/u).filter((s) => s.trim() !== '');
+    for (const [si, raw] of parts.entries()) {
+      const sentence = raw.trim();
+      let rate = 1 + base.rate;
+      let pitch = base.pitch;
+      let pause = 0.3;
+      let note = '陈述';
+      if (/[？?][”"』」)]*\s*$/u.test(sentence)) { rate *= 0.97; pitch += 14; pause = 0.4; note = '问句升调'; }
+      else if (/[！!][”"』」)]*\s*$/u.test(sentence)) { rate *= 1.08; pitch += 8; pause = 0.25; note = '感叹提速'; }
+      else if (/…{1,2}\s*$/u.test(sentence)) { rate *= 0.85; pitch -= 8; pause = 0.7; note = '省略号放慢'; }
+      else if (sentence.length > 40) { rate *= 0.93; note = '长句降速'; }
+      const paraEnd = si === parts.length - 1;
+      if (paraEnd && !isLastPara) { pause = 0.9; note += '｜段间大喘气'; }
+      segs.push({ sentence, rate, pitch, note, pause: Math.round(pause * pauseScale * 100) / 100 });
+    }
+  }
+  return segs;
 };
 
-/** say 引擎：内嵌 [[rate]]/[[pitch]] 逐句控制。 */
-const speakSay = (plan, voice, dryRun) => {
+/** sleep 助手（句间呼吸用）。 */
+const nap = (seconds) => new Promise((resolve) => {
+  const t = setTimeout(resolve, Math.max(0, seconds) * 1000);
+  if (typeof t.unref === 'function') t.unref();
+});
+
+/** say 引擎：逐句调用 say（内嵌 [[rate]]/[[pitch]]），句间真停顿「喘气」。 */
+const speakSay = async (plan, voice, dryRun) => {
   // say 的 [[pitch]] 单位约 0-100（默认 50），[[rate]] 是 wpm
   const wpm = 200;
-  let script = '';
-  for (const seg of plan) {
-    const rateWpm = Math.round(wpm * seg.rate);
-    const pitchVal = Math.max(0, Math.min(100, 50 + seg.pitch));
-    script += `[[rate ${rateWpm}]][[pitch ${pitchVal}]]${seg.sentence} `;
-  }
-  script = script.trim();
   if (dryRun) {
-    for (const seg of plan) console.log(`  [${seg.note}] rate=${(seg.rate).toFixed(2)} pitch=${seg.pitch >= 0 ? '+' : ''}${seg.pitch}  ${seg.sentence.slice(0, 40)}${seg.sentence.length > 40 ? '…' : ''}`);
+    for (const seg of plan) console.log(`  [${seg.note}] rate=${(seg.rate).toFixed(2)} pitch=${seg.pitch >= 0 ? '+' : ''}${seg.pitch} pause=${seg.pause}s  ${seg.sentence.slice(0, 40)}${seg.sentence.length > 40 ? '…' : ''}`);
     console.log(`(say 引擎，音色 ${voice ?? '系统默认'})`);
     return;
   }
-  const args = [];
-  if (voice) args.push('-v', voice);
-  console.log(`朗读中（say · ${voice ?? '系统默认'}，${plan.length} 句）…`);
-  const child = spawn('say', [...args, script], { stdio: 'inherit' });
-  child.on('exit', (code) => process.exit(code === 0 ? 0 : 2));
+  const args = voice ? ['-v', voice] : [];
+  console.log(`朗读中（say · ${voice ?? '系统默认'}，${plan.length} 句，带停顿）…`);
+  for (const [i, seg] of plan.entries()) {
+    const rateWpm = Math.round(wpm * seg.rate);
+    const pitchVal = Math.max(0, Math.min(100, 50 + seg.pitch));
+    try {
+      execFileSync('say', [...args, `[[rate ${rateWpm}]][[pitch ${pitchVal}]]${seg.sentence}`], { stdio: 'ignore' });
+    } catch { process.exit(2); } // 被 stop 杀掉或失败都直接收场
+    // 最后一句不用再喘气
+    if (i < plan.length - 1 && seg.pause > 0) await nap(seg.pause);
+  }
+  console.log('朗读完毕');
 };
 
 /** edge 引擎：逐句合成 mp3（每句单独调 rate/pitch），再按序 afplay。 */
@@ -207,7 +225,7 @@ const speakEdge = async (plan, voice, rateArg, dryRun) => {
     const pitchHz = seg.pitch; // edge 的 pitch 单位是 Hz，正值升调负值降调
     const file = join(TMP_DIR, `${String(i).padStart(3, '0')}.mp3`);
     if (dryRun) {
-      console.log(`  [${seg.note}] rate=${pct >= 0 ? '+' : ''}${pct}% pitch=${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz  ${seg.sentence.slice(0, 40)}${seg.sentence.length > 40 ? '…' : ''}`);
+      console.log(`  [${seg.note}] rate=${pct >= 0 ? '+' : ''}${pct}% pitch=${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz pause=${seg.pause}s  ${seg.sentence.slice(0, 40)}${seg.sentence.length > 40 ? '…' : ''}`);
       continue;
     }
     process.stderr.write(`\r合成中 ${i + 1}/${plan.length}…`);
@@ -223,13 +241,14 @@ const speakEdge = async (plan, voice, rateArg, dryRun) => {
   if (dryRun) { console.log(`(edge 引擎，音色 ${voice})`); return; }
   process.stderr.write('\n');
   if (files.length === 0) { console.error('edge 合成失败（无输出文件）'); process.exit(2); }
-  console.log(`朗读中（edge 神经语音 · ${voice}，${files.length} 句，逐句带情绪起伏）…`);
-  // 顺序播放，直到放完或被 stop 杀掉
-  for (const file of files) {
-    if (!existsSync(file)) continue; // stop 清理过临时目录
+  console.log(`朗读中（edge 神经语音 · ${voice}，${files.length} 句，逐句带情绪起伏与停顿）…`);
+  // 顺序播放，句间按计划停顿「喘气」，直到放完或被 stop 杀掉
+  for (const [i, file] of files.entries()) {
+    if (!existsSync(file)) break; // stop 清理过临时目录
     try {
       execFileSync('afplay', [file], { stdio: 'ignore' });
     } catch { break; } // 被 pkill 或失败都直接收场
+    if (i < files.length - 1 && plan[i]?.pause > 0) await nap(plan[i].pause);
   }
   rmSync(TMP_DIR, { recursive: true, force: true });
   console.log('朗读完毕');
@@ -310,7 +329,7 @@ const main = async () => {
     const voices = listVoices();
     const voice = opts.voice ?? pickDefaultSayVoice(voices);
     const plan = planProsody(cleaned, mood);
-    speakSay(plan, voice, opts.dryRun);
+    await speakSay(plan, voice, opts.dryRun);
     return;
   }
 
