@@ -38,6 +38,7 @@ window.__ModuleLoader__.load({
         duration: '时长(秒)',
         localNote: '本机模式：歌词留空 = 纯音乐；生成比云端快',
         history: '🎞 历史歌曲（点按重听）',
+        historyEmpty: '还没有生成过歌曲',
         durationHint: '歌词约 {n} 字，30 秒可能唱不完、会漏字；将自动延长到约 {m} 秒',
         engineBusy: '引擎正在生成上一首歌，请等它完成再点（本机一次只能生成一首）',
         download: '下载这首',
@@ -72,6 +73,7 @@ window.__ModuleLoader__.load({
         duration: 'Length (s)',
         localNote: 'Local mode: empty lyrics = instrumental; usually faster than cloud',
         history: '🎞 History (tap to replay)',
+        historyEmpty: 'No songs generated yet',
         durationHint: 'About {n} lyric characters: a {m}s song is safer, otherwise words get dropped; duration auto-extends',
         engineBusy: 'The engine is still rendering the previous song; wait for it to finish (one song at a time)',
         download: 'Download this song',
@@ -647,13 +649,27 @@ window.__ModuleLoader__.load({
           style: {
             flex: '1 0 100%',
             display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
+            flexDirection: 'row',
+            alignItems: 'stretch',
+            gap: '10px',
             padding: '8px',
             border: '1px solid var(--dsw-alias-border-l1)',
             borderRadius: '10px',
             background: 'var(--dsw-alias-bg-layer-1)',
-            maxWidth: '420px',
+            maxWidth: '760px',
+          },
+        },
+        // LEFT column: the form. Scrolls on its own so a long status or a
+        // tall lyric box never pushes the history column off screen.
+        h('div', {
+          style: {
+            flex: '1 1 55%',
+            minWidth: '0',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            maxHeight: '320px',
+            overflowY: 'auto',
           },
         },
         h('textarea', {
@@ -724,32 +740,46 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-state-warn-primary)' } },
             t('durationHint').replace('{n}', String(lyricChars)).replace('{m}', String(estimatedSeconds)))
           : null,
-        history.length > 0
-          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
-            h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('history')),
-            h('div', { style: { maxHeight: '132px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' } },
-              history.map((song) => h('div', { key: String(song?.id ?? ''), class: ROW_CLASS },
-                h('button', {
-                  type: 'button',
-                  class: HIST_CLASS,
-                  onClick: () => replay(song),
-                  title: String(song?.style ?? ''),
-                  style: { flex: '1 1 auto', minWidth: '0' },
-                },
-                h('span', { style: { flex: '0 0 auto' } }, '▶'),
-                h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-                  String(song?.style || song?.title || song?.id || '')),
-                h('span', { style: { flex: '0 0 auto', color: 'var(--dsw-alias-label-secondary)' } },
-                  `${typeof song?.duration === 'number' ? Math.round(song.duration) : '?'}s ${song?.source === 'cloud' ? '☁️' : '💻'}`)),
-                h('a', {
-                  class: DL_CLASS,
-                  href: String(song?.url ?? ''),
-                  download: downloadName(song),
-                  target: song?.source === 'cloud' ? '_blank' : undefined,
-                  rel: 'noopener',
-                  title: t('download'),
-                }, '⬇')))))
-          : null,
+        ),
+        // RIGHT column: song history. Its own scrollbar and its own cap,
+        // so browsing history never moves the form (and vice versa).
+        h('div', {
+          style: {
+            flex: '1 1 45%',
+            minWidth: '0',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '4px',
+            maxHeight: '320px',
+            overflowY: 'auto',
+            paddingLeft: '10px',
+            borderLeft: '1px solid var(--dsw-alias-border-l1)',
+          },
+        },
+        h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', flex: '0 0 auto' } }, t('history')),
+        history.length === 0
+          ? h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('historyEmpty'))
+          : history.map((song) => h('div', { key: String(song?.id ?? ''), class: ROW_CLASS },
+            h('button', {
+              type: 'button',
+              class: HIST_CLASS,
+              onClick: () => replay(song),
+              title: String(song?.style ?? ''),
+              style: { flex: '1 1 auto', minWidth: '0' },
+            },
+            h('span', { style: { flex: '0 0 auto' } }, '▶'),
+            h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              String(song?.style || song?.title || song?.id || '')),
+            h('span', { style: { flex: '0 0 auto', color: 'var(--dsw-alias-label-secondary)' } },
+              `${typeof song?.duration === 'number' ? Math.round(song.duration) : '?'}s ${song?.source === 'cloud' ? '☁️' : '💻'}`)),
+            h('a', {
+              class: DL_CLASS,
+              href: String(song?.url ?? ''),
+              download: downloadName(song),
+              target: song?.source === 'cloud' ? '_blank' : undefined,
+              rel: 'noopener',
+              title: t('download'),
+            }, '⬇'))))
         ) : null);
     }
 
