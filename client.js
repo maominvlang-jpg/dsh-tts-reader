@@ -39,6 +39,7 @@ window.__ModuleLoader__.load({
         localNote: '本机模式：歌词留空 = 纯音乐；生成比云端快',
         history: '🎞 历史歌曲（点按重听）',
         durationHint: '歌词约 {n} 字，30 秒可能唱不完、会漏字；将自动延长到约 {m} 秒',
+        engineBusy: '引擎正在生成上一首歌，请等它完成再点（本机一次只能生成一首）',
       },
       en: {
         speak: 'Read latest reply',
@@ -71,6 +72,7 @@ window.__ModuleLoader__.load({
         localNote: 'Local mode: empty lyrics = instrumental; usually faster than cloud',
         history: '🎞 History (tap to replay)',
         durationHint: 'About {n} lyric characters: a {m}s song is safer, otherwise words get dropped; duration auto-extends',
+        engineBusy: 'The engine is still rendering the previous song; wait for it to finish (one song at a time)',
       },
     };
 
@@ -530,7 +532,7 @@ window.__ModuleLoader__.load({
           });
           const start = await startRes.json();
           if (start?.ok !== true) {
-            finish(start?.error === 'no-api-key' ? t('needKey') : (start?.providerMsg ?? t('songFailed')));
+            finish(start?.error === 'no-api-key' ? t('needKey') : start?.error === 'busy' ? t('engineBusy') : (start?.providerMsg ?? t('songFailed')));
             return;
           }
           if (apiKey.trim() !== '') {

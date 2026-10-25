@@ -339,6 +339,8 @@ export function apply(ctx) {
   /** In-memory local-generation jobs: taskId -> { status, tracks, error }. */
   const localJobs = new Map();
   let localSeq = 0;
+  /** The engine renders one song at a time; refuse overlap with a clear error. */
+  let localBusy = false;
 
   /** Structural lyric tags ACE-Step understands natively. */
   const LYRIC_STRUCTURE = /\[(verse|chorus|intro|outro|bridge|pre_chorus|hook)\]/i;
@@ -462,7 +464,7 @@ export function apply(ctx) {
       job.status = 'GENERATE_AUDIO_FAILED';
       const message = String(error?.message ?? error);
       job.error = /fetch failed|ECONNREFUSED|ECONNRESET/i.test(message)
-        ? '本机引擎未启动（mlx-serve）。运行：mlx-serve --serve --port 8080 --model-dir ~/.mlx-serve/models --skip-mem-preflight'
+        ? '本机引擎无响应：可能正在忙（稍等几秒重试），或未启动。启动命令：mlx-serve --serve --port 8080 --model-dir ~/.mlx-serve/models --skip-mem-preflight'
         : message;
     }
   };
@@ -502,6 +504,10 @@ export function apply(ctx) {
     }
 
     if (provider === 'local') {
+      if (localBusy) {
+        sendJson(res, { ok: false, error: 'busy' });
+        return;
+      }
       const fresh = await loadConfig();
       const localBase = typeof body.localBase === 'string' && /^https?:\/\//.test(body.localBase) ? body.localBase.trim().replace(/\/+$/, '') : (typeof fresh.localBase === 'string' ? fresh.localBase : DEFAULT_LOCAL_BASE);
       if (typeof body.localBase === 'string' && /^https?:\/\//.test(body.localBase)) await saveConfig({ localBase });
@@ -509,7 +515,10 @@ export function apply(ctx) {
       localSeq += 1;
       const taskId = `local-${Date.now()}-${localSeq}`;
       localJobs.set(taskId, { status: 'PENDING', tracks: [], error: null });
-      void runLocalJob(taskId, { ...fresh, localBase }, { lyrics, style, title, duration });
+      localBusy = true;
+      void runLocalJob(taskId, { ...fresh, localBase }, { lyrics, style, title, duration }).finally(() => {
+        localBusy = false;
+      });
       sendJson(res, { ok: true, taskId });
       return;
     }
