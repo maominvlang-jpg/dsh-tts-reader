@@ -235,6 +235,8 @@ export function apply(ctx) {
   const CONFIG_DIR = join(homedir(), '.dsh', 'dsh-tts-reader');
   const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
   const SONGS_DIR = join(CONFIG_DIR, 'songs');
+  const HISTORY_FILE = join(CONFIG_DIR, 'history.json');
+  const HISTORY_LIMIT = 50;
   const DEFAULT_BASE = 'https://api.sunoapi.org';
   const DEFAULT_LOCAL_BASE = 'http://127.0.0.1:8080';
   const DEFAULT_LOCAL_MODEL = 'ACE-Step-1.5-XL-Turbo-MLX-Serve-8bit';
@@ -338,6 +340,32 @@ export function apply(ctx) {
   const localJobs = new Map();
   let localSeq = 0;
 
+  /** Generated-song history (newest first), persisted as JSON, capped. */
+  let historyCache = null;
+  const loadHistory = async () => {
+    if (historyCache !== null) return historyCache;
+    try {
+      historyCache = JSON.parse(await readFile(HISTORY_FILE, 'utf8'));
+      if (!Array.isArray(historyCache)) historyCache = [];
+    } catch {
+      historyCache = [];
+    }
+    return historyCache;
+  };
+  const persistHistory = async (list) => {
+    historyCache = list;
+    try {
+      await mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
+      await writeFile(HISTORY_FILE, JSON.stringify(list), { mode: 0o600 });
+    } catch {}
+  };
+  const appendHistory = async (entry) => {
+    const list = await loadHistory();
+    list.unshift(entry);
+    while (list.length > HISTORY_LIMIT) list.pop();
+    await persistHistory(list);
+  };
+
   /** Run one ACE-Step generation through mlx-serve; stores the wav on disk. */
   const runLocalJob = async (taskId, config, options) => {
     const job = localJobs.get(taskId);
@@ -373,6 +401,14 @@ export function apply(ctx) {
       await writeFile(join(SONGS_DIR, fileName), bytes, { mode: 0o600 });
       job.status = 'SUCCESS';
       job.tracks = [{ id: taskId, title: options.title, duration: options.duration, url: `/dsh-tts/local-song/${fileName}` }];
+      await appendHistory({
+        id: taskId,
+        source: 'local',
+        url: `/dsh-tts/local-song/${fileName}`,
+        style: options.style,
+        duration: options.duration,
+        createdAt: Date.now(),
+      });
     } catch (error) {
       job.status = 'GENERATE_AUDIO_FAILED';
       const message = String(error?.message ?? error);
@@ -381,6 +417,11 @@ export function apply(ctx) {
         : message;
     }
   };
+
+  /** Metadata of in-flight cloud tasks so history can label them later. */
+  const cloudMeta = new Map();
+  /** Cloud taskIds whose first track already entered history. */
+  const cloudRecorded = new Set();
 
   const singStartHandler = async (req, res) => {
     if (req.method !== 'POST') {
@@ -424,8 +465,7 @@ export function apply(ctx) {
       return;
     }
 
-    const apiKey = typeof body.apiKey === 'string' && body.apiKey.trim() !== '' ? body.apiKey.trim() : config.apiKey;
-    if (typeof apiKey !== 'string' || apiKey === '') {
+    const apiKey = typeof body.apiKey === 'string' && body.apiKey.trim() !== '' ? body.apiKey.trim() : config.apiKey;    if (typeof apiKey !== 'string' || apiKey === '') {
       sendJson(res, { ok: false, error: 'no-api-key' });
       return;
     }
@@ -453,6 +493,7 @@ export function apply(ctx) {
       return;
     }
     sendJson(res, { ok: true, taskId });
+    cloudMeta.set(taskId, { style, title });
   };
 
   const singStatusHandler = async (req, res) => {
@@ -507,12 +548,53 @@ export function apply(ctx) {
         url: track.audio_url,
       });
     }
+    // Record the FIRST ready track of each cloud task into history once.
+    if (tracks.length > 0 && !cloudRecorded.has(taskId)) {
+      cloudRecorded.add(taskId);
+      const meta = cloudMeta.get(taskId) ?? {};
+      cloudMeta.delete(taskId);
+      await appendHistory({
+        id: tracks[0].id,
+        source: 'cloud',
+        url: tracks[0].url,
+        style: typeof meta.style === 'string' ? meta.style : '',
+        title: tracks[0].title,
+        duration: tracks[0].duration,
+        createdAt: Date.now(),
+      });
+    }
     sendJson(res, {
       ok: true,
       status: providerStatus,
       tracks,
       error: typeof data.errorMessage === 'string' && data.errorMessage !== '' ? data.errorMessage : null,
     });
+  };
+
+  /** Song history, newest first; local entries vanish when their file is gone. */
+  const historyHandler = async (req, res) => {
+    if (req.method !== 'GET') {
+      sendJson(res, { ok: false, error: 'GET required' }, 405);
+      return;
+    }
+    const list = await loadHistory();
+    const kept = [];
+    for (const entry of list) {
+      if (entry?.source === 'local') {
+        const name = typeof entry.url === 'string' ? entry.url.split('/').pop() : '';
+        const exists = await new Promise((resolve) => {
+          if (!/^local-[A-Za-z0-9._-]{1,120}\.wav$/.test(String(name))) {
+            resolve(false);
+            return;
+          }
+          stat(join(SONGS_DIR, String(name)), (error, info) => resolve(error === null && info.isFile()));
+        });
+        if (!exists) continue; // file deleted -> drop from history
+      }
+      kept.push(entry);
+    }
+    if (kept.length !== list.length) await persistHistory(kept);
+    sendJson(res, { ok: true, songs: kept });
   };
 
   /** Serve one locally generated song (name is strictly validated). */
@@ -550,6 +632,7 @@ export function apply(ctx) {
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-config', handler: configHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-start', handler: singStartHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-status', handler: singStatusHandler }),
+      ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-history', handler: historyHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/local-song', handler: localSongHandler }),
     ];
     return () => {

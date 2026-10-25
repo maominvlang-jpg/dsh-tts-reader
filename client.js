@@ -37,6 +37,7 @@ window.__ModuleLoader__.load({
         modeLocal: '💻 本机（免费）',
         duration: '时长(秒)',
         localNote: '本机模式：歌词留空 = 纯音乐；生成比云端快',
+        history: '🎞 历史歌曲（点按重听）',
       },
       en: {
         speak: 'Read latest reply',
@@ -67,6 +68,7 @@ window.__ModuleLoader__.load({
         modeLocal: '💻 Local (free)',
         duration: 'Length (s)',
         localNote: 'Local mode: empty lyrics = instrumental; usually faster than cloud',
+        history: '🎞 History (tap to replay)',
       },
     };
 
@@ -210,10 +212,11 @@ window.__ModuleLoader__.load({
         songAudio = null;
       }
     }
-    function startSong(url) {
+    function startSong(url, onEnded) {
       stopSong();
       const audio = new Audio(url);
       songAudio = audio;
+      if (typeof onEnded === 'function') audio.onended = onEnded;
       audio.play().catch(() => {});
     }
 
@@ -277,6 +280,7 @@ window.__ModuleLoader__.load({
 
     const STYLE_CLASS = 'dsh-tts-reader-btn';
     const SELECT_CLASS = 'dsh-tts-reader-voice';
+    const HIST_CLASS = 'dsh-tts-reader-hist';
 
     function IconSpeaker() {
       return h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, 'aria-hidden': true,
@@ -372,7 +376,11 @@ window.__ModuleLoader__.load({
           + `border-color:var(--dsw-alias-brand-primary);}`
           + `.${SELECT_CLASS}{max-width:180px;padding:3px 6px;border:1px solid var(--dsw-alias-border-l1);`
           + `border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);`
-          + `font-size:12px;line-height:16px;cursor:pointer;}`),
+          + `font-size:12px;line-height:16px;cursor:pointer;}`
+          + `.${HIST_CLASS}{display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;`
+          + `padding:3px 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:transparent;`
+          + `color:var(--dsw-alias-label-primary);font-size:12px;line-height:16px;cursor:pointer;text-align:left;}`
+          + `.${HIST_CLASS}:hover{background:var(--dsw-alias-bg-layer-2);}`),
         h('button', {
           type: 'button',
           class: STYLE_CLASS,
@@ -462,6 +470,14 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [playing, setPlaying] = React.useState(false);
       const [status, setStatus] = React.useState('');
+      const [history, setHistory] = React.useState([]);
+
+      const refreshHistory = () => {
+        fetch('/dsh-tts/sing-history', { cache: 'no-store' })
+          .then((r) => r.json())
+          .then((d) => setHistory(Array.isArray(d?.songs) ? d.songs : []))
+          .catch(() => {});
+      };
 
       React.useEffect(() => {
         if (!open) return undefined;
@@ -473,6 +489,7 @@ window.__ModuleLoader__.load({
             if (typeof d?.localDuration === 'number') setDuration(d.localDuration);
           })
           .catch(() => setConfigured(false));
+        refreshHistory();
         return () => {};
       }, [open]);
 
@@ -537,7 +554,8 @@ window.__ModuleLoader__.load({
                 setBusy(false);
                 setPlaying(true);
                 setStatus(`${t('songReady')} ${track.title ?? ''}`.trim());
-                startSong(track.url);
+                startSong(track.url, () => setPlaying(false));
+                refreshHistory();
                 return;
               }
               if (typeof d?.status === 'string' && /(FAILED|ERROR)/.test(d.status)) {
@@ -554,6 +572,19 @@ window.__ModuleLoader__.load({
         } catch {
           finish(t('songFailed'));
         }
+      };
+
+      const replay = (song) => {
+        if (typeof song?.url !== 'string' || song.url === '') return;
+        stopEngine(); // one voice at a time
+        let sid = null;
+        try {
+          sid = getSessionId();
+        } catch {}
+        lastSongSession = sid;
+        setPlaying(true);
+        setStatus(`▶ ${(song.style || song.title || '').slice(0, 60)}`);
+        startSong(song.url, () => setPlaying(false));
       };
 
       const onClickSong = () => {
@@ -661,6 +692,23 @@ window.__ModuleLoader__.load({
           configured === true && apiKey.trim() !== '' ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('keySaved')) : null,
         ),
         status !== '' ? h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, status) : null,
+        history.length > 0
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+            h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('history')),
+            h('div', { style: { maxHeight: '132px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' } },
+              history.map((song) => h('button', {
+                key: String(song?.id ?? ''),
+                type: 'button',
+                class: HIST_CLASS,
+                onClick: () => replay(song),
+                title: String(song?.style ?? ''),
+              },
+              h('span', { style: { flex: '0 0 auto' } }, '▶'),
+              h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                String(song?.style || song?.title || song?.id || '')),
+              h('span', { style: { flex: '0 0 auto', color: 'var(--dsw-alias-label-secondary)' } },
+                `${typeof song?.duration === 'number' ? Math.round(song.duration) : '?'}s ${song?.source === 'cloud' ? '☁️' : '💻'}`)))))
+          : null,
         ) : null);
     }
 
