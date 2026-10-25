@@ -156,6 +156,14 @@ window.__ModuleLoader__.load({
         // Images are never spoken; link text is.
         .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
         .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        // Kaomoji in any bracket style: (￣o￣)（ฅ´>ω•ฅ）_(:з」∠)_ — short
+        // symbol-only groups with no CJK text inside; stripped WHOLE so the
+        // bracket removal below cannot leave "￣o￣" behind to be spoken.
+        .replace(/[（(][^一-鿿（）()]{1,14}[）)]/g, (m) => (/[￣ω▽☆♪•´ฅ><・εз∀∧∠□]/u.test(m) ? ' ' : m))
+        // Bare kaomoji runs and decorative bars: ￣ω￣、☆★～
+        .replace(/[￣▽☆★♪・•]{2,}/g, ' ')
+        // Sleep marks: zzZ / zzz
+        .replace(/\bzz+z?\b/gi, ' ')
         // Emojis and pictographs, including ZWJ / variation-selector runs.
         .replace(/[\u00A9\u00AE\u203C\u2049\u2122\u2139\u2190-\u21FF\u2300-\u27BF\u2B00-\u2BFF\u{1F000}-\u{1FAFF}\u{FE0F}\u{200D}\u{20E3}]+/gu, '')
         // Decorative brackets/symbols vanish; the words inside survive.
