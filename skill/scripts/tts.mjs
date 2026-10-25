@@ -226,10 +226,10 @@ const planProsody = (text, mood) => {
   return segs;
 };
 
-/** sleep 助手（句间呼吸用）。 */
+/** sleep 助手（句间呼吸用）。注意：绝不能 unref()——await 一个已 unref 的
+ *  定时器时，事件循环里没有别的活，Node 会直接静默退出，后面的句子全丢。 */
 const nap = (seconds) => new Promise((resolve) => {
-  const t = setTimeout(resolve, Math.max(0, seconds) * 1000);
-  if (typeof t.unref === 'function') t.unref();
+  setTimeout(resolve, Math.max(0, seconds) * 1000);
 });
 
 /** say 引擎：逐句调用 say（内嵌 [[rate]]/[[pitch]]），句间真停顿「喘气」。 */
