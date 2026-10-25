@@ -20,6 +20,7 @@ window.__ModuleLoader__.load({
         sing: '唱歌',
         singLyrics: '歌词（留空则 AI 自动写词）',
         singStyle: '风格，如：慵懒民谣 女声 温暖',
+        singTitle: '歌曲名称（可选）',
         singGender: '声线',
         genderAuto: '自动',
         genderM: '男声',
@@ -55,6 +56,7 @@ window.__ModuleLoader__.load({
         sing: 'Sing',
         singLyrics: 'Lyrics (empty = AI writes them)',
         singStyle: 'Style, e.g. mellow folk female vocal warm',
+        singTitle: 'Song title (optional)',
         singGender: 'Vocal',
         genderAuto: 'Auto',
         genderM: 'Male',
@@ -478,6 +480,7 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false);
       const [lyrics, setLyrics] = React.useState('');
       const [style, setStyle] = React.useState('');
+      const [title, setTitle] = React.useState('');
       const [gender, setGender] = React.useState('');
       const [apiKey, setApiKey] = React.useState('');
       const [configured, setConfigured] = React.useState(null);
@@ -537,6 +540,7 @@ window.__ModuleLoader__.load({
               provider,
               lyrics,
               style,
+              title,
               localDuration: duration,
               ...(gender !== '' ? { vocalGender: gender } : {}),
               ...(apiKey.trim() !== '' ? { apiKey: apiKey.trim() } : {}),
@@ -610,7 +614,7 @@ window.__ModuleLoader__.load({
 
       /** A filesystem-friendly download name derived from the song entry. */
       const downloadName = (song) => {
-        const raw = String(song?.style || song?.title || song?.id || 'song').slice(0, 24);
+        const raw = String(song?.title || song?.style || song?.id || 'song').slice(0, 24);
         const safe = raw.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '') || 'song';
         const ext = /\.mp3($|\?)/i.test(String(song?.url ?? '')) ? 'mp3' : 'wav';
         const seconds = typeof song?.duration === 'number' ? Math.round(song.duration) : '';
@@ -673,7 +677,7 @@ window.__ModuleLoader__.load({
           },
         },
         h('textarea', {
-          style: { ...inputStyle, minHeight: '56px', resize: 'vertical' },
+          style: { ...inputStyle, minHeight: '120px', resize: 'vertical' },
           placeholder: t('singLyrics'),
           value: lyrics,
           onChange: (e) => setLyrics(e.target.value),
@@ -683,6 +687,13 @@ window.__ModuleLoader__.load({
           placeholder: t('singStyle'),
           value: style,
           onChange: (e) => setStyle(e.target.value),
+        }),
+        h('input', {
+          style: inputStyle,
+          placeholder: t('singTitle'),
+          value: title,
+          maxLength: 80,
+          onChange: (e) => setTitle(e.target.value),
         }),
         h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
           h('select', {
@@ -741,8 +752,8 @@ window.__ModuleLoader__.load({
             t('durationHint').replace('{n}', String(lyricChars)).replace('{m}', String(estimatedSeconds)))
           : null,
         ),
-        // RIGHT column: song history. Its own scrollbar and its own cap,
-        // so browsing history never moves the form (and vice versa).
+        // RIGHT column: song history. The header stays pinned; only the list
+        // scrolls, so "历史歌曲" never slides out of view.
         h('div', {
           style: {
             flex: '1 1 45%',
@@ -751,12 +762,34 @@ window.__ModuleLoader__.load({
             flexDirection: 'column',
             gap: '4px',
             maxHeight: '320px',
-            overflowY: 'auto',
+            overflow: 'hidden',
             paddingLeft: '10px',
             borderLeft: '1px solid var(--dsw-alias-border-l1)',
           },
         },
-        h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', flex: '0 0 auto' } }, t('history')),
+        h('div', {
+          style: {
+            fontSize: '12px',
+            color: 'var(--dsw-alias-label-secondary)',
+            flex: '0 0 auto',
+            position: 'sticky',
+            top: '0',
+            background: 'var(--dsw-alias-bg-layer-1)',
+            zIndex: '1',
+            paddingTop: '2px',
+            paddingBottom: '2px',
+          },
+        }, t('history')),
+        h('div', {
+          style: {
+            flex: '1 1 auto',
+            minHeight: '0',
+            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '4px',
+          },
+        },
         history.length === 0
           ? h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('historyEmpty'))
           : history.map((song) => h('div', { key: String(song?.id ?? ''), class: ROW_CLASS },
@@ -769,7 +802,7 @@ window.__ModuleLoader__.load({
             },
             h('span', { style: { flex: '0 0 auto' } }, '▶'),
             h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-              String(song?.style || song?.title || song?.id || '')),
+              String(song?.title || song?.style || song?.id || '')),
             h('span', { style: { flex: '0 0 auto', color: 'var(--dsw-alias-label-secondary)' } },
               `${typeof song?.duration === 'number' ? Math.round(song.duration) : '?'}s ${song?.source === 'cloud' ? '☁️' : '💻'}`)),
             h('a', {
@@ -779,7 +812,7 @@ window.__ModuleLoader__.load({
               target: song?.source === 'cloud' ? '_blank' : undefined,
               rel: 'noopener',
               title: t('download'),
-            }, '⬇'))))
+            }, '⬇')))))
         ) : null);
     }
 

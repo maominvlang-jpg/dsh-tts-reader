@@ -480,6 +480,7 @@ export function apply(ctx) {
         source: 'local',
         url: `/dsh-tts/local-song/${fileName}`,
         style: options.style,
+        title: options.title,
         duration,
         createdAt: Date.now(),
       });
