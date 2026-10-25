@@ -17,6 +17,22 @@ window.__ModuleLoader__.load({
         unsupported: '当前浏览器不支持语音合成',
         mismatch: '未找到当前会话的回复，改读最新一条',
         voice: '音色',
+        sing: '唱歌',
+        singLyrics: '歌词（留空则 AI 自动写词）',
+        singStyle: '风格，如：慵懒民谣 女声 温暖',
+        singGender: '声线',
+        genderAuto: '自动',
+        genderM: '男声',
+        genderF: '女声',
+        apiKey: 'API Key',
+        saveKey: '保存',
+        keySaved: '密钥已保存 ✓',
+        needKey: '请先在面板里填写并保存 API Key',
+        generate: '✨ 生成歌曲',
+        generating: '生成中（约 1~2 分钟）',
+        songReady: '生成完成，开始播放 🎵',
+        songFailed: '生成失败',
+        stopSong: '⏹ 停止播放',
       },
       en: {
         speak: 'Read latest reply',
@@ -27,6 +43,22 @@ window.__ModuleLoader__.load({
         unsupported: 'Speech synthesis is not supported in this browser',
         mismatch: 'No reply for this session yet, reading the newest one',
         voice: 'Voice',
+        sing: 'Sing',
+        singLyrics: 'Lyrics (empty = AI writes them)',
+        singStyle: 'Style, e.g. mellow folk female vocal warm',
+        singGender: 'Vocal',
+        genderAuto: 'Auto',
+        genderM: 'Male',
+        genderF: 'Female',
+        apiKey: 'API Key',
+        saveKey: 'Save',
+        keySaved: 'Key saved ✓',
+        needKey: 'Set and save your API Key in the panel first',
+        generate: '✨ Generate song',
+        generating: 'Generating (about 1-2 min)',
+        songReady: 'Done, playing 🎵',
+        songFailed: 'Generation failed',
+        stopSong: '⏹ Stop playback',
       },
     };
 
@@ -155,6 +187,28 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** One song at a time, module-wide (shared with the session guard). */
+    let songAudio = null;
+    let songPoll = null;
+    /** Conversation that started the current song/poll; null = none. */
+    let lastSongSession = null;
+    function stopSong() {
+      if (songPoll !== null) {
+        clearInterval(songPoll);
+        songPoll = null;
+      }
+      if (songAudio !== null) {
+        try { songAudio.pause(); } catch {}
+        songAudio = null;
+      }
+    }
+    function startSong(url) {
+      stopSong();
+      const audio = new Audio(url);
+      songAudio = audio;
+      audio.play().catch(() => {});
+    }
+
     /**
      * Hard-stop the engine. `cancel()` alone occasionally loses the race in
      * Chromium, so a follow-up check cancels (and pauses) again.
@@ -169,7 +223,6 @@ window.__ModuleLoader__.load({
         try { if (synth.speaking || synth.pending) { synth.cancel(); synth.pause(); } } catch {}
       }, 200);
     }
-
     /** localStorage key of the user's chosen voice (by voiceURI). */
     const VOICE_KEY = 'dsh-tts-reader.voice';
 
@@ -276,6 +329,7 @@ window.__ModuleLoader__.load({
           return;
         }
         const synth = window.speechSynthesis;
+        stopSong(); // one voice at a time: starting speech stops any song
         try { synth.cancel(); } catch {}
         const utter = new SpeechSynthesisUtterance(clean);
         const voice = chooseVoice(synth, clean);
@@ -319,6 +373,7 @@ window.__ModuleLoader__.load({
           title: speaking ? t('stop') : t('speak'),
         }, speaking ? h(IconStop) : h(IconSpeaker), h('span', {}, speaking ? t('stop') : t('speak'))),
         h(VoiceSelect, { translate }),
+        h(SingPanel, { translate, getSessionId }),
         hint !== '' ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, hint) : null);
     }
 
@@ -381,6 +436,196 @@ window.__ModuleLoader__.load({
       }, `${v?.name ?? ''} (${v?.lang ?? ''})`)));
     }
 
+    /**
+     * Singing panel: lyrics + style -> provider task -> poll -> play the
+     * finished track. The API key is saved on the Host (~/.dsh config,
+     * mode 600) and only ever travels over loopback.
+     */
+    function SingPanel({ translate, getSessionId }) {
+      const t = translate;
+      const [open, setOpen] = React.useState(false);
+      const [lyrics, setLyrics] = React.useState('');
+      const [style, setStyle] = React.useState('');
+      const [gender, setGender] = React.useState('');
+      const [apiKey, setApiKey] = React.useState('');
+      const [configured, setConfigured] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [playing, setPlaying] = React.useState(false);
+      const [status, setStatus] = React.useState('');
+
+      React.useEffect(() => {
+        if (!open) return undefined;
+        fetch('/dsh-tts/sing-config', { cache: 'no-store' })
+          .then((r) => r.json())
+          .then((d) => setConfigured(d?.configured === true))
+          .catch(() => setConfigured(false));
+        return () => {};
+      }, [open]);
+
+      React.useEffect(() => () => { stopSong(); lastSongSession = null; setPlaying(false); }, []);
+
+      const finish = (message) => {
+        stopSong(); // clears the poll
+        lastSongSession = null;
+        setBusy(false);
+        setPlaying(false);
+        setStatus(message);
+      };
+
+      const generate = async () => {
+        if (busy) return;
+        stopEngine(); // one voice at a time: a song stops any speech
+        setBusy(true);
+        setPlaying(false);
+        setStatus(t('generating'));
+        let sessionId = null;
+        try {
+          sessionId = getSessionId();
+        } catch {}
+        try {
+          const startRes = await fetch('/dsh-tts/sing-start', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              lyrics,
+              style,
+              ...(gender !== '' ? { vocalGender: gender } : {}),
+              ...(apiKey.trim() !== '' ? { apiKey: apiKey.trim() } : {}),
+            }),
+          });
+          const start = await startRes.json();
+          if (start?.ok !== true) {
+            finish(start?.error === 'no-api-key' ? t('needKey') : (start?.providerMsg ?? t('songFailed')));
+            return;
+          }
+          if (apiKey.trim() !== '') {
+            setConfigured(true);
+            setApiKey('');
+          }
+          lastSongSession = sessionId;
+          const taskId = start.taskId;
+          let seconds = 0;
+          songPoll = setInterval(async () => {
+            seconds += 4;
+            try {
+              const r = await fetch('/dsh-tts/sing-status?taskId=' + encodeURIComponent(taskId), { cache: 'no-store' });
+              const d = await r.json();
+              if (d?.ok !== true) {
+                finish(d?.providerMsg ?? t('songFailed'));
+                return;
+              }
+              const track = Array.isArray(d.tracks) ? d.tracks.find((x) => typeof x?.url === 'string' && x.url !== '') : undefined;
+              if (track !== undefined) {
+                stopSong();
+                lastSongSession = sessionId;
+                setBusy(false);
+                setPlaying(true);
+                setStatus(`${t('songReady')} ${track.title ?? ''}`.trim());
+                startSong(track.url);
+                return;
+              }
+              if (typeof d?.status === 'string' && /(FAILED|ERROR)/.test(d.status)) {
+                finish(d?.error ?? t('songFailed'));
+                return;
+              }
+              if (seconds >= 600) {
+                finish(t('songFailed'));
+                return;
+              }
+              setStatus(`${t('generating')} · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`);
+            } catch {}
+          }, 4000);
+        } catch {
+          finish(t('songFailed'));
+        }
+      };
+
+      const onClickSong = () => {
+        if (playing || busy) {
+          finish('');
+          return;
+        }
+        void generate();
+      };
+
+      const inputStyle = {
+        width: '100%',
+        boxSizing: 'border-box',
+        padding: '4px 8px',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        borderRadius: '8px',
+        background: 'var(--dsw-alias-bg-layer-1)',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: '12px',
+        lineHeight: '16px',
+      };
+
+      return h(React.Fragment, {},
+        h('button', {
+          type: 'button',
+          class: STYLE_CLASS,
+          'data-speaking': busy || playing ? 'true' : 'false',
+          onClick: () => setOpen((v) => !v),
+          title: t('sing'),
+        }, h('span', {}, '🎤'), h('span', {}, t('sing'))),
+        open ? h('div', {
+          style: {
+            flex: '1 0 100%',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            padding: '8px',
+            border: '1px solid var(--dsw-alias-border-l1)',
+            borderRadius: '10px',
+            background: 'var(--dsw-alias-bg-layer-1)',
+            maxWidth: '420px',
+          },
+        },
+        h('textarea', {
+          style: { ...inputStyle, minHeight: '56px', resize: 'vertical' },
+          placeholder: t('singLyrics'),
+          value: lyrics,
+          onChange: (e) => setLyrics(e.target.value),
+        }),
+        h('input', {
+          style: inputStyle,
+          placeholder: t('singStyle'),
+          value: style,
+          onChange: (e) => setStyle(e.target.value),
+        }),
+        h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
+          h('select', {
+            style: { ...inputStyle, width: 'auto' },
+            value: gender,
+            onChange: (e) => setGender(e.target.value),
+            'aria-label': t('singGender'),
+          },
+          h('option', { value: '' }, t('genderAuto')),
+          h('option', { value: 'm' }, t('genderM')),
+          h('option', { value: 'f' }, t('genderF'))),
+          h('input', {
+            style: { ...inputStyle, width: '160px' },
+            type: 'password',
+            placeholder: configured === true ? '••••••••' : t('apiKey'),
+            value: apiKey,
+            onChange: (e) => setApiKey(e.target.value),
+          }),
+        ),
+        h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
+          h('button', {
+            type: 'button',
+            class: STYLE_CLASS,
+            onClick: () => void generate(),
+            disabled: busy,
+            style: { opacity: busy ? 0.6 : 1 },
+          }, h('span', {}, t('generate'))),
+          playing ? h('button', { type: 'button', class: STYLE_CLASS, onClick: onClickSong }, h('span', {}, t('stopSong'))) : null,
+          configured === true && apiKey.trim() !== '' ? h('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, t('keySaved')) : null,
+        ),
+        status !== '' ? h('div', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } }, status) : null,
+        ) : null);
+    }
+
     return {
       inject: ['slots', 'uiSession'],
       apply(ctx) {
@@ -411,9 +656,10 @@ window.__ModuleLoader__.load({
         const active = store();
         if (active !== null) {
           releaseGuard = active.subscribe(() => {
-            if (!speech.speaking) return;
+            if (!speech.speaking && songAudio === null && songPoll === null) return;
             const sid = getSessionId();
-            if (speech.sessionId !== null && sid !== null && !sameSession(sid, speech.sessionId)) stopEngine();
+            if (speech.speaking && speech.sessionId !== null && sid !== null && !sameSession(sid, speech.sessionId)) stopEngine();
+            if ((songAudio !== null || songPoll !== null) && sid !== null && lastSongSession !== null && !sameSession(sid, lastSongSession)) stopSong();
           });
         }
         ctx.effect(() => { releaseGuard(); clearKeepAlive(); });

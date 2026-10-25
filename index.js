@@ -10,6 +10,10 @@
  * and returns no session content other than assistant reply text.
  */
 
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+
 export const inject = ['webServer'];
 
 /** Same-origin route the Client half fetches; no trailing slash. */
@@ -221,5 +225,219 @@ export function apply(ctx) {
     });
   };
 
-  ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: ROUTE, handler }));
+  // ── Singing: cloud music generation over a Suno-compatible API ──────────
+  // API key and endpoint live in ~/.dsh/dsh-tts-reader/config.json (mode 600)
+  // and never leave this machine; audio streams from the provider's CDN.
+
+  const CONFIG_DIR = join(homedir(), '.dsh', 'dsh-tts-reader');
+  const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+  const DEFAULT_BASE = 'https://api.sunoapi.org';
+
+  let configCache = null;
+  const loadConfig = async () => {
+    if (configCache !== null) return configCache;
+    try {
+      configCache = JSON.parse(await readFile(CONFIG_FILE, 'utf8'));
+    } catch {
+      configCache = {};
+    }
+    return configCache;
+  };
+  const saveConfig = async (patch) => {
+    const merged = { ...(await loadConfig()), ...patch };
+    configCache = merged;
+    await mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    await writeFile(CONFIG_FILE, JSON.stringify(merged, null, 2), { mode: 0o600 });
+    return merged;
+  };
+
+  const readJsonBody = (req, limit = 1024 * 256) => new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > limit) {
+        req.destroy();
+        reject(new Error('body too large'));
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(body === '' ? {} : JSON.parse(body));
+      } catch {
+        reject(new Error('invalid JSON body'));
+      }
+    });
+    req.on('error', reject);
+  });
+
+  /** Call the provider; never throws — provider errors come back as data. */
+  const providerCall = async (config, path, init) => {
+    const base = String(config.baseUrl || DEFAULT_BASE).replace(/\/+$/, '');
+    try {
+      const res = await fetch(base + path, {
+        ...init,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${config.apiKey}`,
+          ...(init?.headers ?? {}),
+        },
+      });
+      let payload = null;
+      try {
+        payload = await res.json();
+      } catch {}
+      return { status: res.status, payload };
+    } catch (error) {
+      return { status: 0, payload: { msg: String(error?.message ?? error) } };
+    }
+  };
+
+  const configHandler = async (req, res) => {
+    if (req.method === 'GET') {
+      const config = await loadConfig();
+      sendJson(res, {
+        ok: true,
+        configured: typeof config.apiKey === 'string' && config.apiKey !== '',
+        baseUrl: typeof config.baseUrl === 'string' ? config.baseUrl : DEFAULT_BASE,
+        model: typeof config.model === 'string' ? config.model : 'V6',
+      });
+      return;
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, { ok: false, error: 'GET or POST required' }, 405);
+      return;
+    }
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message }, 400);
+      return;
+    }
+    const patch = {};
+    if (typeof body.apiKey === 'string') patch.apiKey = body.apiKey.trim();
+    if (typeof body.baseUrl === 'string' && /^https?:\/\//.test(body.baseUrl)) patch.baseUrl = body.baseUrl.trim().replace(/\/+$/, '');
+    if (typeof body.model === 'string' && /^(V6|V6_MINI|V6_WILD)$/.test(body.model)) patch.model = body.model;
+    const saved = await saveConfig(patch);
+    sendJson(res, { ok: true, configured: typeof saved.apiKey === 'string' && saved.apiKey !== '' });
+  };
+
+  const singStartHandler = async (req, res) => {
+    if (req.method !== 'POST') {
+      sendJson(res, { ok: false, error: 'POST required' }, 405);
+      return;
+    }
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message }, 400);
+      return;
+    }
+    const config = await loadConfig();
+    if (typeof body.apiKey === 'string' && body.apiKey.trim() !== '') await saveConfig({ apiKey: body.apiKey.trim() });
+    const apiKey = typeof body.apiKey === 'string' && body.apiKey.trim() !== '' ? body.apiKey.trim() : config.apiKey;
+    if (typeof apiKey !== 'string' || apiKey === '') {
+      sendJson(res, { ok: false, error: 'no-api-key' });
+      return;
+    }
+    const lyrics = typeof body.lyrics === 'string' ? body.lyrics.slice(0, 5000) : '';
+    const style = typeof body.style === 'string' ? body.style.slice(0, 1000) : '';
+    const title = typeof body.title === 'string' ? body.title.slice(0, 80) : '';
+    const vocalGender = body.vocalGender === 'm' || body.vocalGender === 'f' ? body.vocalGender : undefined;
+    if (lyrics === '' && style === '') {
+      sendJson(res, { ok: false, error: 'lyrics-or-style required' });
+      return;
+    }
+    const payload = {
+      customMode: true,
+      instrumental: false,
+      model: typeof config.model === 'string' && /^(V6|V6_MINI|V6_WILD)$/.test(config.model) ? config.model : 'V6',
+      lyrics,
+      style,
+      ...(title !== '' ? { title } : {}),
+      ...(vocalGender !== undefined ? { vocalGender } : {}),
+    };
+    const { status, payload: provider } = await providerCall({ ...config, apiKey }, '/api/v1/generate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    const taskId = provider?.data?.taskId;
+    if ((status !== 200 && status !== 201) || typeof taskId !== 'string') {
+      sendJson(res, {
+        ok: false,
+        providerStatus: status,
+        providerCode: typeof provider?.code === 'number' ? provider.code : null,
+        providerMsg: typeof provider?.msg === 'string' ? provider.msg : typeof provider?.message === 'string' ? provider.message : null,
+      });
+      return;
+    }
+    sendJson(res, { ok: true, taskId });
+  };
+
+  const singStatusHandler = async (req, res) => {
+    if (req.method !== 'GET') {
+      sendJson(res, { ok: false, error: 'GET required' }, 405);
+      return;
+    }
+    let taskId = null;
+    try {
+      taskId = new URL(req.url ?? '/', 'http://localhost').searchParams.get('taskId');
+    } catch {}
+    if (typeof taskId !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(taskId)) {
+      sendJson(res, { ok: false, error: 'bad taskId' }, 400);
+      return;
+    }
+    const config = await loadConfig();
+    if (typeof config.apiKey !== 'string' || config.apiKey === '') {
+      sendJson(res, { ok: false, error: 'no-api-key' });
+      return;
+    }
+    const { status, payload: provider } = await providerCall(config, `/api/v1/generate/record-info?taskId=${encodeURIComponent(taskId)}`, {
+      method: 'GET',
+    });
+    if (status !== 200) {
+      sendJson(res, {
+        ok: false,
+        providerStatus: status,
+        providerMsg: typeof provider?.msg === 'string' ? provider.msg : null,
+      });
+      return;
+    }
+    const data = provider?.data ?? {};
+    const providerStatus = typeof data.status === 'string' ? data.status : 'UNKNOWN';
+    const rawTracks = Array.isArray(data?.response?.sunoData) ? data.response.sunoData : [];
+    const tracks = [];
+    for (const [index, track] of rawTracks.entries()) {
+      if (typeof track?.audio_url !== 'string' || track.audio_url === '') continue;
+      tracks.push({
+        id: typeof track.id === 'string' ? track.id : String(index),
+        title: typeof track.title === 'string' ? track.title : '',
+        duration: typeof track.duration === 'number' ? track.duration : null,
+        url: track.audio_url,
+      });
+    }
+    sendJson(res, {
+      ok: true,
+      status: providerStatus,
+      tracks,
+      error: typeof data.errorMessage === 'string' && data.errorMessage !== '' ? data.errorMessage : null,
+    });
+  };
+
+  ctx.effect(() => {
+    const offs = [
+      ctx.webServer.register({ kind: 'prefix', path: ROUTE, handler }),
+      ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-config', handler: configHandler }),
+      ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-start', handler: singStartHandler }),
+      ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-status', handler: singStatusHandler }),
+    ];
+    return () => {
+      for (const off of offs) {
+        try {
+          off();
+        } catch {}
+      }
+    };
+  });
 }
