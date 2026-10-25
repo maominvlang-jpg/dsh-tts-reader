@@ -52,6 +52,22 @@ Notes: local mode is fully offline; songs are cached in `~/.dsh/dsh-tts-reader/s
 Browsers can only use installed system voices. On macOS, download premium Chinese voices under
 `System Settings → Accessibility → Spoken Content → Manage Voices → Chinese` (Siri voices or Tingting), then pick them in the dropdown.
 
+## 🧠 Skill edition (agent-driven)
+
+The repo also ships an **installable DSH skill** ([skill/](skill)) that lets the agent read text aloud and generate songs directly — no button needed:
+
+```sh
+mkdir -p ~/.dsh/skills && cp -R skill ~/.dsh/skills/dsh-tts-reader
+```
+
+Once installed, just ask the agent to "read this aloud" or "write me a song". Highlights:
+
+- **Read aloud**: native macOS `say` (offline) for any text/file/stdin; `--dry-run` previews the sanitized text, `stop` halts playback, voice preference persists
+- **Sing**: `song.mjs gen --style "…" --lyrics "…"` — shares the same local engine, config (`~/.dsh/dsh-tts-reader/`) and song cache as the plugin; lyrics are auto-split into lines and duration auto-extends to fit
+- See [skill/SKILL.md](skill/SKILL.md); engine setup in [skill/references/setup.md](skill/references/setup.md)
+
+The plugin and the skill coexist without conflicts.
+
 ## How it works
 
 ```

@@ -56,6 +56,23 @@ dsh plugin --profile desktop add github:maominvlang-jpg/dsh-tts-reader
 
 `系统设置 → 辅助功能 → 朗读内容 → 管理语音 → 中文`，勾选 **Siri 声音** 或 **婷婷（高级版）**，下载完成后在插件下拉框里选中即可。
 
+## 🧠 Skill 版（Agent 直接驱动）
+
+仓库还附带一个**可安装的 DSH skill**（[skill/](skill) 目录），让 Agent 直接完成朗读与唱歌，无需点按钮：
+
+```sh
+# 安装（复制到用户级 skill 目录，所有会话可用）
+mkdir -p ~/.dsh/skills && cp -R skill ~/.dsh/skills/dsh-tts-reader
+```
+
+安装后直接对 Agent 说「念给我听」「唱首歌」即可触发。能力一览：
+
+- **朗读**：macOS 原生 `say`（离线），可念任意文本/文件/管道输入；`--dry-run` 预览净化结果、`stop` 随时停止、音色偏好持久化
+- **唱歌**：`song.mjs gen --style "…" --lyrics "…"`，与插件共用同一本机引擎、同一配置（`~/.dsh/dsh-tts-reader/`）与歌曲缓存；歌词自动分行、时长按字数自动延长
+- 详见 [skill/SKILL.md](skill/SKILL.md)；引擎安装见 [skill/references/setup.md](skill/references/setup.md)
+
+插件版与 skill 版可共存，互不冲突。
+
 ## 工作原理
 
 ```
