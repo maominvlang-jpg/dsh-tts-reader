@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
         autoRead: '自动朗读',
         stopAuto: '自动朗读中，点击停止',
         loading: '获取中…',
+        waitRecital: '另一个声音正在朗读，等它念完再念给你听…',
+        staleHost: '检测到旧版 Host（未重启），朗读内容可能不全；重启 DSH 后恢复正常',
         empty: '暂无可朗读的内容',
         failed: '朗读失败，请重试',
         unsupported: '当前浏览器不支持语音合成',
@@ -49,6 +51,8 @@ window.__ModuleLoader__.load({
         autoRead: 'Auto-read',
         stopAuto: 'Auto-reading, click to stop',
         loading: 'Loading…',
+        waitRecital: 'Another voice is reading; waiting for it to finish…',
+        staleHost: 'Stale Host detected (not restarted yet); reading may skip content — restart DSH to fix',
         empty: 'Nothing to read yet',
         failed: 'Reading failed, try again',
         unsupported: 'Speech synthesis is not supported in this browser',
@@ -290,6 +294,7 @@ window.__ModuleLoader__.load({
       utteranceToken++;
       clearParaTimer();
       stopCloneAudio(); // clone-voice playback rides the same stop button
+      disarmYieldWatch();
       const synth = typeof window === 'undefined' ? undefined : window.speechSynthesis;
       speech.clear();
       if (!synth) return;
@@ -297,6 +302,97 @@ window.__ModuleLoader__.load({
       setTimeout(() => {
         try { if (synth.speaking || synth.pending) { synth.cancel(); synth.pause(); } } catch {}
       }, 200);
+    }
+
+    // ── One voice at a time ──────────────────────────────────────────────
+    // A CLI recital (`tts.mjs speak`, e.g. reciting a poem) owns the speaker
+    // while it runs: it claims the shared voice channel (reported by the Host
+    // at /dsh-tts/playback). The read-aloud voice YIELDS — it never starts
+    // during a recital, mutes itself if one begins mid-speech, and does not
+    // repeat text the recital already spoke.
+    const PLAYBACK_ROUTE = '/dsh-tts/playback';
+
+    /** Best-effort read of the shared voice state; null when unavailable. */
+    async function fetchPlayback() {
+      try {
+        const res = await fetch(PLAYBACK_ROUTE, { cache: 'no-store' });
+        const data = await res.json();
+        return data?.ok === true ? data : null;
+      } catch {
+        return null; // stale Host without the route: fail open, no arbitration
+      }
+    }
+
+    /** True while a CLI recital holds the speaker. */
+    function recitalActive(data) {
+      return data != null && data.cli != null && data.cli.active === true;
+    }
+
+    /**
+     * Comparison form for "did the recital already say this?": drop
+     * whitespace, punctuation and symbols so the CLI's `一。二。` rendering and
+     * the reply's `一\n二` rendering compare equal.
+     */
+    function normalizeForMatch(text) {
+      let out = '';
+      const map = []; // normalized index → ORIGINAL index
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (/[\s\p{P}\p{S}]/u.test(ch)) continue;
+        out += ch.toLowerCase();
+        map.push(i);
+      }
+      return { text: out, map };
+    }
+
+    /**
+     * Cut portions the recital already performed out of a to-be-spoken chunk,
+     * so the read-aloud voice never re-reads a poem the agent just recited.
+     */
+    function stripRecited(chunk, recited) {
+      if (typeof chunk !== 'string' || !Array.isArray(recited) || recited.length === 0) return chunk;
+      let out = chunk;
+      for (const raw of recited) {
+        const needle = normalizeForMatch(typeof raw === 'string' ? raw : '').text;
+        if (needle.length < 16) continue; // too short to safely match prose
+        for (let guard = 0; guard < 4 && out !== ''; guard++) {
+          const { text, map } = normalizeForMatch(out);
+          const at = text.indexOf(needle);
+          if (at === -1) break;
+          const start = map[at];
+          const end = map[at + needle.length - 1] + 1;
+          out = (out.slice(0, start) + ' ' + out.slice(end)).trim();
+        }
+      }
+      return out;
+    }
+
+    /** Watchdog interval; armed only while this page is making noise. */
+    let yieldWatch = null;
+    function disarmYieldWatch() {
+      if (yieldWatch !== null) {
+        clearInterval(yieldWatch);
+        yieldWatch = null;
+      }
+    }
+    /**
+     * While a voice plays, watch the channel every 300ms: the moment a CLI
+     * recital claims it, mute THIS voice (the recital wins). Self-disarms when
+     * playback ends.
+     */
+    function armYieldWatch() {
+      disarmYieldWatch();
+      yieldWatch = setInterval(() => {
+        if (!speech.speaking && !cloneBusy) {
+          disarmYieldWatch();
+          return;
+        }
+        void fetchPlayback().then((data) => {
+          if (yieldWatch === null || !recitalActive(data)) return;
+          disarmYieldWatch();
+          stopEngine(); // hand the speaker to the recital, mid-sentence
+        });
+      }, 300);
     }
     /** localStorage key of the user's chosen voice (by voiceURI). */
     const VOICE_KEY = 'dsh-tts-reader.voice';
@@ -436,20 +532,29 @@ window.__ModuleLoader__.load({
 
       /**
        * Best voice first: the Host-rendered clone wav (西施嗓), browser
-       * speechSynthesis as the universal fallback.
+       * speechSynthesis as the universal fallback. Yields to a CLI recital and
+       * drops text the recital already spoke. Returns 'spoken', 'yielded'
+       * (a recital owns the speaker), 'empty' (nothing left to say) or
+       * 'stopped' (cancelled mid-flight).
        */
       const speakBest = async (raw, sid, answered) => {
+        const state = await fetchPlayback();
+        if (recitalActive(state)) return 'yielded';
+        const text = stripRecited(raw, state?.recited);
+        if (text.trim() === '') return 'empty';
         stopCloneAudio(); // one voice at a time
         const token = ++cloneToken;
         cloneBusy = true;
         cloneSession = typeof sid === 'string' && sid !== '' ? sid : null;
         setHint(t('loading'));
-        const cloneOk = await speakClone(sid, token, raw);
+        armYieldWatch(); // mute mid-sentence if a recital claims the speaker
+        const cloneOk = await speakClone(sid, token, text);
         cloneBusy = false;
-        if (cloneOk) return;
-        if (token !== cloneToken) return; // user stopped mid-wait
+        if (cloneOk) return 'spoken';
+        if (token !== cloneToken) return 'stopped'; // user stopped mid-wait
         cloneSession = null;
-        speakText(raw, sid, answered); // fallback voice
+        speakText(text, sid, answered); // fallback voice
+        return 'spoken';
       };
 
       /** Speak one reply fetched from the Host; shared by click and auto-read. */
@@ -525,27 +630,46 @@ window.__ModuleLoader__.load({
           setHint(t('unsupported'));
           return;
         }
-        setHint(t('loading'));
-        let raw = '';
-        let answered = null;
-        // Read the conversation the page is showing, so the button always
-        // speaks THIS session's newest reply rather than another one.
-        let sid = null;
-        try {
-          sid = getSessionId();
-        } catch {}
-        try {
-          let url = ROUTE;
-          if (typeof sid === 'string' && sid !== '') url += '?session=' + encodeURIComponent(sid);
-          const res = await fetch(url, { cache: 'no-store' });
-          const data = await res.json();
-          raw = typeof data?.text === 'string' ? data.text : '';
-          answered = typeof data?.session === 'string' ? data.session : null;
-        } catch {
-          setHint(t('failed'));
+        // Never talk over a recital: wait it out first (the button becomes a
+        // promise to read AFTER the recital), then read what remains.
+        for (let attempt = 0; attempt < 240; attempt++) {
+          const state = await fetchPlayback();
+          if (recitalActive(state)) {
+            setHint(t('waitRecital'));
+            await new Promise((r) => setTimeout(r, 500));
+            continue;
+          }
+          setHint(t('loading'));
+          let raw = '';
+          let answered = null;
+          // Read the conversation the page is showing, so the button always
+          // speaks THIS session's newest reply rather than another one.
+          let sid = null;
+          try {
+            sid = getSessionId();
+          } catch {}
+          try {
+            let url = ROUTE;
+            if (typeof sid === 'string' && sid !== '') url += '?session=' + encodeURIComponent(sid);
+            const res = await fetch(url, { cache: 'no-store' });
+            const data = await res.json();
+            raw = typeof data?.text === 'string' ? data.text : '';
+            answered = typeof data?.session === 'string' ? data.session : null;
+          } catch {
+            setHint(t('failed'));
+            return;
+          }
+          const result = await speakBest(raw, sid, answered);
+          if (result === 'yielded') {
+            // Lost the race to a recital that just claimed the speaker.
+            setHint(t('waitRecital'));
+            await new Promise((r) => setTimeout(r, 500));
+            continue;
+          }
+          if (result === 'empty') setHint(t('empty'));
           return;
         }
-        void speakBest(raw, sid, answered);
+        setHint(t('waitRecital')); // still reciting after ~2 min: give up quietly
       };
 
       // Auto-read: watch the displayed conversation and speak each NEW
@@ -586,6 +710,12 @@ window.__ModuleLoader__.load({
           try {
             const res = await fetch(ROUTE + '?session=' + encodeURIComponent(sid), { cache: 'no-store' });
             const data = await res.json();
+            // Stale-Host detector: turn-accumulation lives in index.js, which
+            // only loads at process start. A hard refresh alone leaves the old
+            // Host running — it caches just the LAST assistant message, so
+            // multi-part replies read from the middle. Say so instead of
+            // silently skipping content.
+            if (data?.turn !== 1) setHint(t('staleHost'));
             if (data?.session != null && !sameSession(String(data.session), sid)) return; // fallback reply: not ours
             const text = typeof data?.text === 'string' ? data.text : '';
             if (text === '') return;
@@ -599,8 +729,16 @@ window.__ModuleLoader__.load({
             // may have STARTED speaking while it was in flight. Re-check here
             // or we'd cancel+restart and Chromium could play both at once.
             if (speech.speaking || cloneBusy) return;
+            // A CLI recital (the agent reading a poem aloud) owns the speaker:
+            // stay silent and do NOT consume the chunk — the new tail is read
+            // once the recital releases the channel.
+            const state = await fetchPlayback();
+            if (recitalActive(state)) return;
             spokenRef.current = text;
-            void speakBest(chunk, sid, String(data.session ?? ''));
+            const result = await speakBest(chunk, sid, String(data.session ?? ''));
+            // Lost the race to a recital between the check and the start:
+            // un-consume the chunk so the next poll retries it.
+            if (result === 'yielded' && spokenRef.current === text) spokenRef.current = spoken;
           } catch {}
         };
         const timer = setInterval(() => void poll(), 2000);

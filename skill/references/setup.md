@@ -75,3 +75,22 @@ Key 只保存在本机 `~/.dsh/dsh-tts-reader/config.json`（权限 600）。
 | 生成中报 ECONNREFUSED | 引擎正忙或刚重启，等几秒重试 |
 | HTTP 5xx + 模型加载错误 | 模型目录名不对或下载不完整，核对目录名与文件数 |
 | 歌词被吞字 | 歌词自动延长仍不够时显式加大 `--duration`（上限 600s） |
+
+## 6. 朗读引擎增强（可选，一次性）
+
+`tts.mjs` 的 edge 在线音色与 F5 声音克隆分别装在 `~/.dsh/dsh-tts-reader/venv` 和 `venv-f5`，装好后自动识别、无需配置：
+
+```bash
+# edge-tts 在线音色（约 20MB；朗读时需联网）
+python3 -m venv ~/.dsh/dsh-tts-reader/venv
+~/.dsh/dsh-tts-reader/venv/bin/pip install edge-tts
+
+# F5 声音克隆（MLX，仅 M 系芯片；模型首次使用时自动下载，约 1GB）
+python3 -m venv ~/.dsh/dsh-tts-reader/venv-f5
+~/.dsh/dsh-tts-reader/venv-f5/bin/pip install f5-tts-mlx
+```
+
+验证：`node tts.mjs voices` 末尾应显示 `edge 引擎：可用` / `clone 引擎：可用`（clone 首次注册音色后 `voice-clone/` 目录才会出现）。
+
+- f5-tts-mlx 与新版 mlx 的兼容问题（`random.normal` 参数类型变化）已由 `scripts/clone_speak.py` 在 import 前自动打补丁，无需手改 site-packages
+- 都不装也能用：`say` 引擎完全离线，永远可用

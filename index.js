@@ -257,6 +257,9 @@ export function apply(ctx) {
       seq: answer.seq,
       time: answer.time,
       source: entry !== null ? 'session' : 'global',
+      // Version marker: absent on hosts older than v1.6.6 (single-message
+      // cache, no turn accumulation) — lets the Client detect a stale Host.
+      turn: 1,
       diagnostics,
     });
   };
@@ -271,6 +274,17 @@ export function apply(ctx) {
   const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
   const SONGS_DIR = join(CONFIG_DIR, 'songs');
   const HISTORY_FILE = join(CONFIG_DIR, 'history.json');
+  /**
+   * Shared voice-channel state: `tts.mjs speak` claims it (and heartbeats it)
+   * while reciting, so the read-aloud button and auto-read can yield — two
+   * voices at once is exactly what this file exists to prevent. Stale after
+   * PLAYBACK_TTL_MS without a heartbeat (a killed `speak` self-expires).
+   */
+  const PLAYBACK_FILE = join(CONFIG_DIR, 'playback.json');
+  /** What the CLI already recited (newest last); read-aloud never repeats it. */
+  const RECITED_FILE = join(CONFIG_DIR, 'recited.jsonl');
+  const PLAYBACK_TTL_MS = 4000;
+  const RECITED_TTL_MS = 2 * 60 * 60 * 1000;
   const HISTORY_LIMIT = 50;
   const DEFAULT_BASE = 'https://api.sunoapi.org';
   const DEFAULT_LOCAL_BASE = 'http://127.0.0.1:8080';
@@ -863,7 +877,8 @@ export function apply(ctx) {
       sendJson(res, { ok: false, reason: 'unavailable' });
       return;
     }
-    const mood = typeof config.mood === 'string' && config.mood !== '' ? config.mood : 'calm';
+    // auto = 逐句判情绪（含害羞/温柔/难过…），别钉死在 calm 上
+    const mood = typeof config.mood === 'string' && config.mood !== '' ? config.mood : 'auto';
     const key = cloneKey(answer.text, voice, mood);
     const file = join(CLONE_DIR, `${key}.wav`);
     if (existsSync(file)) {
@@ -911,9 +926,62 @@ export function apply(ctx) {
     });
   };
 
+  /**
+   * Voice-channel arbitration, read-only: reports whether a CLI recital
+   * (`tts.mjs speak`) currently owns the speaker, plus the text recited
+   * recently. The Client yields to an active recital and skips content the
+   * recital already performed (no poem spoken twice, in two voices).
+   */
+  const playbackHandler = (req, res) => {
+    if (req.method !== 'GET') {
+      sendJson(res, { ok: false, error: 'GET required' }, 405);
+      return;
+    }
+    let cli = null;
+    try {
+      const raw = JSON.parse(readFileSync(PLAYBACK_FILE, 'utf8'));
+      const pid = Number(raw?.pid) || 0;
+      const beatAt = Number(raw?.beatAt) || 0;
+      // Liveness beats the heartbeat: `tts.mjs` plays via execFileSync, which
+      // BLOCKS its event loop mid-sentence, so beats legitimately stop for a
+      // while. A live owner process means the recital is still going.
+      let alive = false;
+      if (pid > 0) {
+        try {
+          process.kill(pid, 0);
+          alive = true;
+        } catch (error) {
+          alive = error?.code === 'EPERM'; // alive, just not ours to signal
+        }
+      }
+      if (alive || Date.now() - beatAt < PLAYBACK_TTL_MS) {
+        cli = {
+          active: true,
+          phase: typeof raw.phase === 'string' ? raw.phase : 'playing',
+          pid,
+          since: Number(raw.startedAt) || beatAt,
+          text: typeof raw.text === 'string' ? raw.text : '',
+        };
+      }
+    } catch {}
+    const recited = [];
+    try {
+      for (const line of readFileSync(RECITED_FILE, 'utf8').split('\n')) {
+        if (line.trim() === '') continue;
+        try {
+          const entry = JSON.parse(line);
+          if (typeof entry?.text === 'string' && entry.text !== ''
+            && Date.now() - (Number(entry.at) || 0) < RECITED_TTL_MS) recited.push(entry.text);
+        } catch {}
+      }
+    } catch {}
+    sendJson(res, { ok: true, cli, recited: recited.slice(-20) });
+  };
+
   ctx.effect(() => {
     const offs = [
       ctx.webServer.register({ kind: 'prefix', path: ROUTE, handler }),
+      ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/playback', handler: playbackHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-config', handler: configHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-start', handler: singStartHandler }),
       ctx.webServer.register({ kind: 'prefix', path: '/dsh-tts/sing-status', handler: singStatusHandler }),
